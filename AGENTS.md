@@ -14,6 +14,8 @@ admin opens it in a browser and can:
 
 - Register/save multiple Manticore server connections (arbitrary host + port).
 - Browse tables: list tables, view schema (`DESC`), see row counts.
+- Create and drop tables through a GUI form (not only via the SQL console);
+  optionally add/drop columns and truncate.
 - Read data with pagination, sorting, and full-text search, shown in HTML tables.
 - Insert / edit / delete individual rows through convenient forms.
 - Run arbitrary SQL in a console (like the phpMyAdmin SQL tab).
@@ -236,6 +238,85 @@ not needed here.
 - `/sql` accepts a raw-text or URL-encoded body. JSON endpoints accept a JSON
   body. `/bulk` requires `application/x-ndjson`.
 
+### 4.6 Table DDL — CREATE / DROP / ALTER (run via `/sql?mode=raw`)
+
+Powers the GUI table manager. Manticore runs in **RT (real-time) mode**, so
+tables are created and dropped on the fly. The `id` column (bigint) is
+**implicit — do NOT declare it**.
+
+Create:
+
+```
+CREATE TABLE [IF NOT EXISTS] <name> (
+  <col> <type> [text-modifiers],
+  ...
+) [<option>='<value>' ...]
+```
+
+Example the form should be able to produce:
+
+```
+CREATE TABLE articles (
+  title text indexed stored,
+  body text indexed,
+  slug string,
+  views int,
+  price float,
+  is_published bool,
+  meta json,
+  created_at timestamp,
+  tags multi
+) min_infix_len='2' morphology='stem_en'
+```
+
+Clone an existing schema: `CREATE TABLE <new> LIKE <existing>`.
+
+**Column types the GUI form should offer** (verified against the manual):
+
+| Type          | Meaning                        | Notes |
+|---------------|--------------------------------|-------|
+| `text`        | full-text field (searchable)   | uses the modifiers below; default is `indexed stored` |
+| `string`      | string attribute               | exact value; filter/sort/group, NOT full-text |
+| `int`/`integer` | unsigned 32-bit integer      | shown as `uint` in `DESC` |
+| `bigint`      | signed 64-bit integer          | |
+| `float`       | 32-bit IEEE-754 float          | |
+| `bool`        | boolean (1-bit)                | |
+| `json`        | JSON attribute                 | |
+| `timestamp`   | unix timestamp                 | |
+| `multi`       | MVA — array of uint            | multi-valued attribute |
+| `multi64`     | MVA — array of bigint          | multi-valued attribute |
+| `float_vector`| vector of floats               | KNN/embeddings; advanced, keep optional |
+
+**Text-field modifiers** (space-separated, only for `text` columns):
+
+- `indexed` — full-text searchable.
+- `stored` — original value kept on disk and returned in results.
+- `attribute` — also usable as an attribute.
+- Common combos: `text indexed stored` (default), `text indexed` (searchable,
+  not returned), `text stored` (returned, not searchable).
+
+**Optional CREATE options** (expose a few as an "advanced" section):
+
+- `min_infix_len='2'` / `min_prefix_len='2'` — enable infix/prefix (wildcard) search.
+- `morphology='stem_en'` (also `lemmatize_en`, etc.) — stemming/lemmatization.
+- `engine='columnar'` | `engine='rowwise'` — storage engine.
+- `rt_mem_limit='128M'` — RAM chunk size.
+
+**Drop / truncate / alter:**
+
+- `DROP TABLE [IF EXISTS] <name>`
+- `TRUNCATE TABLE <name>` — empties the table, keeps the schema.
+- `ALTER TABLE <name> ADD COLUMN <col> <type>`
+- `ALTER TABLE <name> DROP COLUMN <col>`
+- Note: only RT tables support insert/edit/`ALTER`. `SHOW TABLES` returns the
+  table type; the GUI should note (or disable edit actions) when a table's type
+  is not `rt`. `ALTER` is unavailable on tables that are part of a replication
+  cluster.
+
+**Escaping:** the table name and column names come from user input. Validate
+identifiers against `^[A-Za-z_][A-Za-z0-9_]*$` before interpolating them into
+DDL; reject anything else rather than trying to escape it.
+
 ---
 
 ## 5. Development / test node
@@ -387,11 +468,15 @@ Environment variables:
    (calls `SHOW VERSION` / `SELECT 1`).
 4. Browse: `SHOW TABLES` -> `DESC <t>` -> paginated `SELECT * FROM <t> LIMIT ...`
    grid built from `columns` + `data`, with a search box.
-5. Row CRUD via forms (INSERT / REPLACE / UPDATE / DELETE — SQL through
+5. Table management (GUI, section 4.6): "New table" form (name + dynamic column
+   rows: name, type dropdown, and — for `text` — indexed/stored/attribute
+   checkboxes, plus an optional "advanced options" section); drop table (with
+   confirm); optional add/drop column and truncate on the table view.
+6. Row CRUD via forms (INSERT / REPLACE / UPDATE / DELETE — SQL through
    `/sql?mode=raw`, or the JSON endpoints in 4.3).
-6. SQL console: textarea -> `/sql?mode=raw` -> render each result set's
+7. SQL console: textarea -> `/sql?mode=raw` -> render each result set's
    `columns`/`data`, plus any `error`/`warning`.
-7. Polish: styling, empty states, error toasts.
+8. Polish: styling, empty states, error toasts.
 
 Ship a minimal `README.md` with install/run/env instructions.
 
@@ -403,5 +488,6 @@ Ship a minimal `README.md` with install/run/env instructions.
 - `package.json` has no runtime deps beyond `better-sqlite3`.
 - Auth works; unauthenticated access is blocked everywhere it should be.
 - Against the test node (`http://192.168.1.75:9318`): can add the connection,
-  browse a table, edit a row, and run SQL — all through the browser.
+  create a table via the GUI form, browse a table, edit a row, drop a table, and
+  run SQL — all through the browser.
 - Manticore `error`/`warning` and app errors are shown clearly, never swallowed.
