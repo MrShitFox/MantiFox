@@ -1,15 +1,26 @@
 import {
+  attributeFields,
+  buildAlterAddColumnSql,
+  buildAlterDropColumnSql,
+  buildAlterModifyBigintSql,
   buildDeleteSql,
-  buildInsertSql,
-  buildReplaceSql,
+  buildCreateTableSql,
+  buildDropTableSql,
+  buildTruncateTableSql,
+  collectJsonMessages,
   collectMessages,
   countRows,
   describeTable,
+  findTable,
   hasResultErrors,
+  insertDocument,
   listTables,
+  replaceDocument,
+  requireRealtimeTable,
   runSql,
   selectRowById,
   selectRows,
+  showCreateTable,
   showTableStatus
 } from '../manticore.js';
 import {
@@ -22,11 +33,11 @@ import {
 import { createLoginSession, destroyRequestSession, expiredSessionCookie, verifyAdminPassword } from '../auth.js';
 import { clampInteger, pathParts, readForm, redirect, sendHtml } from '../router.js';
 import { layout } from '../views/layout.js';
-import { renderBrowsePage, renderConnectionPage, renderRowEditPage } from '../views/browse.js';
+import { renderBrowsePage, renderConnectionPage, renderCreateTablePage, renderRowEditPage } from '../views/browse.js';
 import { renderConsolePage } from '../views/console.js';
 import { renderDashboardPage, renderEditConnectionPage } from '../views/dashboard.js';
 import { renderLoginPage } from '../views/login.js';
-import { renderOperationPage } from '../views/components.js';
+import { renderOperationPage, renderSqlPreviewForm } from '../views/components.js';
 
 export async function handleLogin(req, res) {
   if (req.method === 'GET') {
@@ -115,6 +126,11 @@ async function handleConnectionPages(req, res, url, parts) {
     return sendHtml(res, 200, renderConsolePage({ connection }));
   }
 
+  if (parts.length === 2 && parts[1] === 'new-table') {
+    if (req.method === 'GET') return renderCreateTableForm(res, connection);
+    if (req.method === 'POST') return handleCreateTable(req, res, connection);
+  }
+
   if (parts[1] === 'tables') {
     return handleTablePages(req, res, url, connection, parts.slice(2));
   }
@@ -143,6 +159,42 @@ async function handleTablePages(req, res, url, connection, parts) {
     return renderBrowse(req, res, url, connection, table);
   }
 
+  if (parts.length === 2 && parts[1] === 'drop') {
+    if (req.method === 'GET') return renderTableSqlPreview(res, connection, table, 'Drop table', buildDropTableSql(table), {
+      submitLabel: 'Drop table',
+      destructive: true
+    });
+    if (req.method === 'POST') return handleRunTableSql(req, res, connection, table, buildDropTableSql(table), {
+      successRedirect: `/connections/${connection.id}`,
+      title: 'Drop table'
+    });
+  }
+
+  if (parts.length === 2 && parts[1] === 'truncate') {
+    if (req.method === 'GET') return renderTableSqlPreview(res, connection, table, 'Truncate table', buildTruncateTableSql(table), {
+      submitLabel: 'Truncate table',
+      destructive: true
+    });
+    if (req.method === 'POST') return handleRunTableSql(req, res, connection, table, buildTruncateTableSql(table), {
+      successRedirect: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`,
+      title: 'Truncate table'
+    });
+  }
+
+  if (parts.length === 3 && parts[1] === 'columns' && parts[2] === 'add' && req.method === 'POST') {
+    return handleAddColumn(req, res, connection, table);
+  }
+
+  if (parts.length === 4 && parts[1] === 'columns' && parts[3] === 'drop') {
+    if (req.method === 'GET') return renderDropColumnPreview(res, connection, table, parts[2]);
+    if (req.method === 'POST') return handleDropColumn(req, res, connection, table, parts[2]);
+  }
+
+  if (parts.length === 4 && parts[1] === 'columns' && parts[3] === 'modify-bigint') {
+    if (req.method === 'GET') return renderModifyColumnPreview(res, connection, table, parts[2]);
+    if (req.method === 'POST') return handleModifyColumn(req, res, connection, table, parts[2]);
+  }
+
   if (parts.length === 2 && parts[1] === 'new') {
     if (req.method === 'GET') return renderInsertForm(res, connection, table);
     if (req.method === 'POST') return handleInsertRow(req, res, connection, table);
@@ -154,7 +206,11 @@ async function handleTablePages(req, res, url, connection, parts) {
   }
 
   if (parts.length === 4 && parts[1] === 'rows' && parts[3] === 'delete' && req.method === 'POST') {
-    return handleDeleteRow(res, connection, table, parts[2]);
+    return handleDeleteRow(req, res, connection, table, parts[2]);
+  }
+
+  if (parts.length === 4 && parts[1] === 'rows' && parts[3] === 'delete' && req.method === 'GET') {
+    return renderDeleteRowPreview(res, connection, table, parts[2]);
   }
 
   return sendHtml(res, 404, layout({ title: 'Not found', body: '<section class="panel"><h1>Not found</h1></section>' }));
@@ -170,6 +226,7 @@ async function renderBrowse(req, res, url, connection, table) {
   try {
     const tablesData = await listTables(connection);
     const schemaData = await describeTable(connection, table);
+    const tableMeta = findTable(tablesData.tables, table);
     const validFields = new Set(schemaData.fields.map((field) => field.name));
     if (sort && !validFields.has(sort)) sort = '';
 
@@ -180,9 +237,10 @@ async function renderBrowse(req, res, url, connection, table) {
     if (page > maxPage) page = maxPage;
     const offset = (page - 1) * perPage;
 
-    const [statusResults, rowsResults] = await Promise.all([
+    const [statusResults, rowsResults, showCreateData] = await Promise.all([
       showTableStatus(connection, table),
-      selectRows(connection, table, { limit: perPage, offset, search, sort, dir })
+      selectRows(connection, table, { limit: perPage, offset, search, sort, dir }),
+      showCreateTable(connection, table)
     ]);
 
     const messages = [
@@ -190,13 +248,15 @@ async function renderBrowse(req, res, url, connection, table) {
       ...collectMessages(schemaData.results),
       ...collectMessages(statusResults),
       ...collectMessages(rowsResults),
-      ...collectMessages(countData.results)
+      ...collectMessages(countData.results),
+      ...collectMessages(showCreateData.results)
     ];
 
     return sendHtml(res, 200, renderBrowsePage({
       connection,
       table,
       tables: tablesData.tables,
+      tableMeta,
       schema: schemaData.fields,
       statusResult: statusResults,
       rowsResult: rowsResults[0],
@@ -206,6 +266,7 @@ async function renderBrowse(req, res, url, connection, table) {
       search,
       sort,
       dir,
+      showCreateStatement: showCreateData.statement,
       messages
     }));
   } catch (error) {
@@ -213,34 +274,247 @@ async function renderBrowse(req, res, url, connection, table) {
   }
 }
 
-async function renderInsertForm(res, connection, table, values = {}, error = '') {
-  const schemaData = await describeTable(connection, table);
-  return sendHtml(res, hasResultErrors(schemaData.results) ? 400 : 200, renderRowEditPage({
+async function renderCreateTableForm(res, connection, values = {}, previewSql = '', showExecute = false, error = '') {
+  return sendHtml(res, error ? 400 : 200, renderCreateTablePage({
     connection,
-    table,
-    fields: schemaData.fields,
     values,
-    mode: 'insert',
-    error: error || collectMessages(schemaData.results).map((message) => message.message).join('\n')
+    previewSql,
+    showExecute,
+    error
   }));
 }
 
-async function renderEditForm(res, connection, table, rowId, error = '') {
-  const [schemaData, rowResults] = await Promise.all([
-    describeTable(connection, table),
-    selectRowById(connection, table, rowId)
+async function handleCreateTable(req, res, connection) {
+  const form = await readForm(req);
+  let sql = '';
+  try {
+    sql = buildCreateTableSql(form);
+    if (form.intent === 'execute') {
+      if (!samePreviewSql(form.sql_preview, sql)) {
+        return renderCreateTableForm(res, connection, form, sql, true, 'Review the updated SQL preview before creating the table.');
+      }
+      const results = await runSql(connection, sql);
+      if (collectMessages(results).length) {
+        return renderWriteResult(res, connection, form.table_name || '', 'Create table result', results, `/connections/${connection.id}`);
+      }
+      return redirect(res, `/connections/${connection.id}`);
+    }
+    return renderCreateTableForm(res, connection, form, sql, true);
+  } catch (error) {
+    return renderCreateTableForm(res, connection, form, sql, false, error.message);
+  }
+}
+
+async function loadTableContext(connection, table, action) {
+  const [tablesData, schemaData] = await Promise.all([
+    listTables(connection),
+    describeTable(connection, table)
   ]);
-  const row = rowResults[0]?.data?.[0] || { id: rowId };
-  const messages = [...collectMessages(schemaData.results), ...collectMessages(rowResults)];
-  const messageError = messages.map((message) => message.message).join('\n');
-  return sendHtml(res, hasResultErrors(schemaData.results) || hasResultErrors(rowResults) ? 400 : 200, renderRowEditPage({
-    connection,
-    table,
-    fields: schemaData.fields,
-    values: row,
-    mode: 'edit',
-    error: error || messageError || (!rowResults[0]?.data?.[0] ? 'Row not found' : '')
+  const tableMeta = findTable(tablesData.tables, table);
+  if (!tableMeta) throw Object.assign(new Error(`Table ${table} not found`), { statusCode: 404 });
+  requireRealtimeTable(tableMeta, action);
+  if (hasResultErrors(schemaData.results)) {
+    throw new Error(collectMessages(schemaData.results).map((message) => message.message).join('\n') || 'Could not read schema');
+  }
+  return { tableMeta, fields: schemaData.fields, tablesData, schemaData };
+}
+
+async function renderTableSqlPreview(res, connection, table, title, sql, options = {}) {
+  try {
+    await loadTableContext(connection, table, title);
+    return sendHtml(res, 200, layout({
+      title,
+      body: renderSqlPreviewForm({
+        title,
+        sql,
+        action: `/connections/${connection.id}/tables/${encodeURIComponent(table)}/${title.toLowerCase().startsWith('drop') ? 'drop' : 'truncate'}`,
+        submitLabel: options.submitLabel || 'Run',
+        destructive: Boolean(options.destructive),
+        backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
+      })
+    }));
+  } catch (error) {
+    return renderTableActionError(res, connection, table, title, error.message);
+  }
+}
+
+async function handleRunTableSql(req, res, connection, table, sql, options = {}) {
+  const form = await readForm(req);
+  if (!samePreviewSql(form.sql_preview, sql)) {
+    return renderTableSqlPreview(res, connection, table, options.title || 'Table action', sql, {
+      submitLabel: options.title || 'Run',
+      destructive: true
+    });
+  }
+  try {
+    await loadTableContext(connection, table, options.title || 'Table action');
+    const results = await runSql(connection, sql);
+    if (collectMessages(results).length) {
+      return renderWriteResult(res, connection, table, `${options.title || 'Table action'} result`, results, options.successRedirect || `/connections/${connection.id}`);
+    }
+    return redirect(res, options.successRedirect || `/connections/${connection.id}`);
+  } catch (error) {
+    return renderTableActionError(res, connection, table, options.title || 'Table action failed', error.message);
+  }
+}
+
+async function handleAddColumn(req, res, connection, table) {
+  const form = await readForm(req);
+  try {
+    const { fields } = await loadTableContext(connection, table, 'ADD COLUMN');
+    if (!attributeFields(fields).length) {
+      throw new Error('ADD COLUMN is not available because ALTER requires a table with at least one attribute');
+    }
+    const sql = buildAlterAddColumnSql(table, form);
+    const action = `/connections/${connection.id}/tables/${encodeURIComponent(table)}/columns/add`;
+    if (form.intent === 'execute') {
+      if (!samePreviewSql(form.sql_preview, sql)) {
+        return renderColumnSqlPreview(res, connection, table, 'Add column', sql, action, form, false);
+      }
+      const results = await runSql(connection, sql);
+      if (collectMessages(results).length) {
+        return renderWriteResult(res, connection, table, 'Add column result', results);
+      }
+      return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+    }
+    return renderColumnSqlPreview(res, connection, table, 'Add column', sql, action, form, false);
+  } catch (error) {
+    return renderTableActionError(res, connection, table, 'Add column failed', error.message);
+  }
+}
+
+async function renderDropColumnPreview(res, connection, table, column) {
+  try {
+    const { fields } = await loadTableContext(connection, table, 'DROP COLUMN');
+    const sql = buildAlterDropColumnSql(table, column, fields);
+    return renderColumnSqlPreview(
+      res,
+      connection,
+      table,
+      'Drop column',
+      sql,
+      `/connections/${connection.id}/tables/${encodeURIComponent(table)}/columns/${encodeURIComponent(column)}/drop`,
+      {},
+      true
+    );
+  } catch (error) {
+    return renderTableActionError(res, connection, table, 'Drop column failed', error.message);
+  }
+}
+
+async function handleDropColumn(req, res, connection, table, column) {
+  const form = await readForm(req);
+  try {
+    const { fields } = await loadTableContext(connection, table, 'DROP COLUMN');
+    const sql = buildAlterDropColumnSql(table, column, fields);
+    if (!samePreviewSql(form.sql_preview, sql)) {
+      return renderDropColumnPreview(res, connection, table, column);
+    }
+    const results = await runSql(connection, sql);
+    if (collectMessages(results).length) return renderWriteResult(res, connection, table, 'Drop column result', results);
+    return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+  } catch (error) {
+    return renderTableActionError(res, connection, table, 'Drop column failed', error.message);
+  }
+}
+
+async function renderModifyColumnPreview(res, connection, table, column) {
+  try {
+    const { fields } = await loadTableContext(connection, table, 'MODIFY COLUMN');
+    const sql = buildAlterModifyBigintSql(table, column, fields);
+    return renderColumnSqlPreview(
+      res,
+      connection,
+      table,
+      'Widen column',
+      sql,
+      `/connections/${connection.id}/tables/${encodeURIComponent(table)}/columns/${encodeURIComponent(column)}/modify-bigint`,
+      {},
+      false,
+      'Manticore only supports int to bigint widening.'
+    );
+  } catch (error) {
+    return renderTableActionError(res, connection, table, 'Modify column failed', error.message);
+  }
+}
+
+async function handleModifyColumn(req, res, connection, table, column) {
+  const form = await readForm(req);
+  try {
+    const { fields } = await loadTableContext(connection, table, 'MODIFY COLUMN');
+    const sql = buildAlterModifyBigintSql(table, column, fields);
+    if (!samePreviewSql(form.sql_preview, sql)) {
+      return renderModifyColumnPreview(res, connection, table, column);
+    }
+    const results = await runSql(connection, sql);
+    if (collectMessages(results).length) return renderWriteResult(res, connection, table, 'Modify column result', results);
+    return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+  } catch (error) {
+    return renderTableActionError(res, connection, table, 'Modify column failed', error.message);
+  }
+}
+
+function renderColumnSqlPreview(res, connection, table, title, sql, action, hidden, destructive, message = '') {
+  return sendHtml(res, 200, layout({
+    title,
+    body: renderSqlPreviewForm({
+      title,
+      sql,
+      action,
+      hidden,
+      submitLabel: title,
+      destructive,
+      message,
+      backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
+    })
   }));
+}
+
+function renderTableActionError(res, connection, table, title, message) {
+  return sendHtml(res, 400, layout({
+    title,
+    body: renderOperationPage({
+      title,
+      message,
+      backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
+    })
+  }));
+}
+
+async function renderInsertForm(res, connection, table, values = {}, error = '') {
+  try {
+    const { fields } = await loadTableContext(connection, table, 'Insert row');
+    return sendHtml(res, error ? 400 : 200, renderRowEditPage({
+      connection,
+      table,
+      fields,
+      values,
+      mode: 'insert',
+      error
+    }));
+  } catch (loadError) {
+    return renderTableActionError(res, connection, table, 'Insert row unavailable', loadError.message);
+  }
+}
+
+async function renderEditForm(res, connection, table, rowId, error = '') {
+  try {
+    const { fields, schemaData } = await loadTableContext(connection, table, 'Edit row');
+    const rowResults = await selectRowById(connection, table, rowId);
+    const row = rowResults[0]?.data?.[0] || { id: rowId };
+    const messages = [...collectMessages(schemaData.results), ...collectMessages(rowResults)];
+    const messageError = messages.map((message) => message.message).join('\n');
+    return sendHtml(res, hasResultErrors(schemaData.results) || hasResultErrors(rowResults) ? 400 : 200, renderRowEditPage({
+      connection,
+      table,
+      fields,
+      values: row,
+      mode: 'edit',
+      error: error || messageError || (!rowResults[0]?.data?.[0] ? 'Row not found' : '')
+    }));
+  } catch (loadError) {
+    return renderTableActionError(res, connection, table, 'Edit row unavailable', loadError.message);
+  }
 }
 
 function valuesFromForm(fields, form) {
@@ -255,16 +529,13 @@ function valuesFromForm(fields, form) {
 
 async function handleInsertRow(req, res, connection, table) {
   const form = await readForm(req);
-  const schemaData = await describeTable(connection, table);
-  if (hasResultErrors(schemaData.results)) {
-    return renderInsertForm(res, connection, table, form, collectMessages(schemaData.results).map((message) => message.message).join('\n'));
-  }
-
-  const values = valuesFromForm(schemaData.fields, form);
   try {
-    const results = await runSql(connection, buildInsertSql(table, schemaData.fields, values));
-    if (collectMessages(results).length) {
-      return renderWriteResult(res, connection, table, 'Insert result', results);
+    const { fields } = await loadTableContext(connection, table, 'Insert row');
+    const values = valuesFromForm(fields, form);
+    const payload = await insertDocument(connection, table, fields, values);
+    const messages = collectJsonMessages(payload);
+    if (messages.length) {
+      return renderJsonWriteResult(res, connection, table, 'Insert result', messages);
     }
     return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
   } catch (error) {
@@ -274,16 +545,13 @@ async function handleInsertRow(req, res, connection, table) {
 
 async function handleEditRow(req, res, connection, table, rowId) {
   const form = await readForm(req);
-  const schemaData = await describeTable(connection, table);
-  if (hasResultErrors(schemaData.results)) {
-    return renderEditForm(res, connection, table, rowId, collectMessages(schemaData.results).map((message) => message.message).join('\n'));
-  }
-
-  const values = valuesFromForm(schemaData.fields, form);
   try {
-    const results = await runSql(connection, buildReplaceSql(table, rowId, schemaData.fields, values));
-    if (collectMessages(results).length) {
-      return renderWriteResult(res, connection, table, 'Edit result', results);
+    const { fields } = await loadTableContext(connection, table, 'Edit row');
+    const values = valuesFromForm(fields, form);
+    const payload = await replaceDocument(connection, table, rowId, fields, values);
+    const messages = collectJsonMessages(payload);
+    if (messages.length) {
+      return renderJsonWriteResult(res, connection, table, 'Edit result', messages);
     }
     return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
   } catch (error) {
@@ -291,9 +559,35 @@ async function handleEditRow(req, res, connection, table, rowId) {
   }
 }
 
-async function handleDeleteRow(res, connection, table, rowId) {
+async function renderDeleteRowPreview(res, connection, table, rowId) {
   try {
-    const results = await runSql(connection, buildDeleteSql(table, rowId));
+    await loadTableContext(connection, table, 'Delete row');
+    const sql = buildDeleteSql(table, rowId);
+    return sendHtml(res, 200, layout({
+      title: 'Delete row',
+      body: renderSqlPreviewForm({
+        title: 'Delete row',
+        sql,
+        action: `/connections/${connection.id}/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(rowId)}/delete`,
+        submitLabel: 'Delete row',
+        destructive: true,
+        backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
+      })
+    }));
+  } catch (error) {
+    return renderTableActionError(res, connection, table, 'Delete row unavailable', error.message);
+  }
+}
+
+async function handleDeleteRow(req, res, connection, table, rowId) {
+  const form = await readForm(req);
+  try {
+    await loadTableContext(connection, table, 'Delete row');
+    const sql = buildDeleteSql(table, rowId);
+    if (!samePreviewSql(form.sql_preview, sql)) {
+      return renderDeleteRowPreview(res, connection, table, rowId);
+    }
+    const results = await runSql(connection, sql);
     if (collectMessages(results).length) {
       return renderWriteResult(res, connection, table, 'Delete result', results);
     }
@@ -310,9 +604,20 @@ async function handleDeleteRow(res, connection, table, rowId) {
   }
 }
 
-function renderWriteResult(res, connection, table, title, results) {
+function renderWriteResult(res, connection, table, title, results, backHref = '') {
   const messages = collectMessages(results);
   return sendHtml(res, hasResultErrors(results) ? 400 : 200, layout({
+    title,
+    body: renderOperationPage({
+      title,
+      messages,
+      backHref: backHref || `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
+    })
+  }));
+}
+
+function renderJsonWriteResult(res, connection, table, title, messages) {
+  return sendHtml(res, messages.some((message) => message.type === 'error') ? 400 : 200, layout({
     title,
     body: renderOperationPage({
       title,
@@ -320,6 +625,14 @@ function renderWriteResult(res, connection, table, title, results) {
       backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
     })
   }));
+}
+
+function samePreviewSql(submitted, expected) {
+  return normalizePreviewSql(submitted) === normalizePreviewSql(expected);
+}
+
+function normalizePreviewSql(value) {
+  return String(value ?? '').replace(/\r\n?/g, '\n');
 }
 
 function escapeForError(value) {

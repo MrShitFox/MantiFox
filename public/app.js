@@ -4,6 +4,9 @@
     bindAuthFields();
     bindConnectionTests();
     bindSqlConsole();
+    bindTableBuilder();
+    bindColumnKindControls();
+    bindJsonValidation();
   });
 
   function bindConfirmations() {
@@ -103,6 +106,142 @@
         results.appendChild(alertNode(error.message, 'error'));
       }
     });
+  }
+
+  function bindTableBuilder() {
+    document.querySelectorAll('[data-create-table-form]').forEach(function (form) {
+      var list = form.querySelector('[data-column-list]');
+      var countInput = form.querySelector('[data-column-count]');
+      var addButton = form.querySelector('[data-add-column]');
+      if (!list || !countInput || !addButton) return;
+
+      addButton.addEventListener('click', function () {
+        var index = Number.parseInt(countInput.value || '0', 10) || 0;
+        list.insertAdjacentHTML('beforeend', createColumnRowHtml(index));
+        countInput.value = String(index + 1);
+        bindColumnKindControls(list.lastElementChild);
+        disableExecute(form);
+      });
+
+      list.addEventListener('click', function (event) {
+        var button = event.target.closest('[data-remove-column]');
+        if (!button) return;
+        var row = button.closest('[data-column-row]');
+        if (row) row.remove();
+        disableExecute(form);
+      });
+
+      bindPreviewInvalidation(form);
+    });
+  }
+
+  function bindPreviewInvalidation(form) {
+    if (form.dataset.previewInvalidationBound) return;
+    form.dataset.previewInvalidationBound = '1';
+    form.addEventListener('input', function (event) {
+      if (event.target && event.target.name === 'sql_preview') return;
+      disableExecute(form);
+    });
+    form.addEventListener('change', function () {
+      disableExecute(form);
+    });
+  }
+
+  function disableExecute(form) {
+    var execute = form.querySelector('button[name="intent"][value="execute"]');
+    if (execute) execute.disabled = true;
+  }
+
+  function bindColumnKindControls(root) {
+    var scope = root || document;
+    var rows = [];
+    if (scope.matches && scope.matches('[data-column-row], .add-column-form')) rows.push(scope);
+    scope.querySelectorAll('[data-column-row], .add-column-form').forEach(function (row) {
+      rows.push(row);
+    });
+
+    rows.forEach(function (row) {
+      if (row.dataset.columnKindBound) return;
+      row.dataset.columnKindBound = '1';
+      var select = row.querySelector('[data-column-type]');
+      if (!select) return;
+
+      function update() {
+        var type = select.value;
+        var indexed = row.querySelector('input[name$="indexed"]');
+        var stored = row.querySelector('input[name$="stored"]');
+        if (type === 'string' && indexed && stored && indexed.checked && stored.checked) {
+          stored.checked = false;
+        }
+        row.querySelectorAll('.column-modifier').forEach(function (node) {
+          node.hidden = type !== 'text' && type !== 'string';
+        });
+        row.querySelectorAll('.json-option').forEach(function (node) {
+          node.hidden = type !== 'json';
+        });
+        row.querySelectorAll('.vector-options').forEach(function (node) {
+          node.hidden = type !== 'float_vector';
+        });
+      }
+
+      select.addEventListener('change', update);
+      update();
+    });
+  }
+
+  function bindJsonValidation() {
+    document.querySelectorAll('form').forEach(function (form) {
+      if (form.dataset.jsonValidationBound) return;
+      form.dataset.jsonValidationBound = '1';
+      form.addEventListener('submit', function (event) {
+        var invalid = null;
+        form.querySelectorAll('[data-json-input]').forEach(function (textarea) {
+          if (invalid) return;
+          var raw = textarea.value.trim();
+          if (!raw) return;
+          try {
+            JSON.parse(raw);
+          } catch (error) {
+            invalid = textarea;
+          }
+        });
+        if (invalid) {
+          event.preventDefault();
+          invalid.focus();
+          window.alert('JSON fields must contain valid JSON.');
+        }
+      });
+    });
+  }
+
+  function createColumnRowHtml(index) {
+    var prefix = 'col_' + index + '_';
+    return '<div class="column-row" data-column-row>' +
+      '<div class="column-row-main">' +
+      '<label><span>Name</span><input name="' + prefix + 'name" required pattern="[A-Za-z_][A-Za-z0-9_]*"></label>' +
+      '<label><span>Type</span><select name="' + prefix + 'type" data-column-type>' +
+      columnTypes().map(function (type) {
+        return '<option value="' + type + '">' + type + '</option>';
+      }).join('') +
+      '</select></label>' +
+      '<button type="button" class="secondary compact-remove" data-remove-column>Remove</button>' +
+      '</div>' +
+      '<div class="column-flags" data-column-kind>' +
+      '<label class="checkbox-card column-modifier"><input type="checkbox" name="' + prefix + 'indexed" value="1" checked> <span>indexed</span></label>' +
+      '<label class="checkbox-card column-modifier"><input type="checkbox" name="' + prefix + 'stored" value="1" checked> <span>stored</span></label>' +
+      '<label class="checkbox-card column-modifier"><input type="checkbox" name="' + prefix + 'attribute" value="1"> <span>attribute</span></label>' +
+      '<label class="checkbox-card json-option"><input type="checkbox" name="' + prefix + 'secondary_index" value="1"> <span>secondary_index=1</span></label>' +
+      '<div class="vector-options">' +
+      '<label><span>knn_type</span><input name="' + prefix + 'knn_type" value="hnsw"></label>' +
+      '<label><span>knn_dims</span><input name="' + prefix + 'knn_dims" inputmode="numeric"></label>' +
+      '<label><span>similarity</span><select name="' + prefix + 'hnsw_similarity"><option value="l2">l2</option><option value="ip">ip</option><option value="cosine">cosine</option></select></label>' +
+      '</div>' +
+      '</div>' +
+      '</div>';
+  }
+
+  function columnTypes() {
+    return ['text', 'string', 'int', 'integer', 'bigint', 'float', 'bool', 'json', 'timestamp', 'multi', 'multi64', 'float_vector'];
   }
 
   function renderResultSets(target, resultSets) {

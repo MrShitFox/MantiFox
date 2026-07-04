@@ -71,11 +71,50 @@ export function renderOperationPage({ title, message, messages = [], backHref = 
   </section>`;
 }
 
+export function renderHiddenFields(values = {}) {
+  return Object.entries(values).map(([key, value]) => (
+    `<input type="hidden" name="${escapeAttr(key)}" value="${escapeAttr(valueToText(value))}">`
+  )).join('');
+}
+
+export function renderSqlPreviewForm({
+  title,
+  sql,
+  action,
+  hidden = {},
+  submitLabel = 'Run',
+  destructive = false,
+  message = '',
+  backHref = '/'
+}) {
+  return `<section class="panel narrow">
+    <p><a href="${escapeAttr(backHref)}">Back</a></p>
+    <h1>${escapeHtml(title)}</h1>
+    ${message ? `<p class="muted">${escapeHtml(message)}</p>` : ''}
+    <label class="sql-preview">
+      <span>SQL preview</span>
+      <textarea readonly rows="6">${escapeHtml(sql)}</textarea>
+    </label>
+    <form method="post" action="${escapeAttr(action)}" class="stacked-form" ${destructive ? `data-confirm="${escapeAttr(submitLabel)}?"` : ''}>
+      ${renderHiddenFields(hidden)}
+      <input type="hidden" name="intent" value="execute">
+      <input type="hidden" name="sql_preview" value="${escapeAttr(sql)}">
+      <div class="form-actions">
+        <button class="${destructive ? 'danger' : ''}" type="submit">${escapeHtml(submitLabel)}</button>
+        <a class="button secondary" href="${escapeAttr(backHref)}">Cancel</a>
+      </div>
+    </form>
+  </section>`;
+}
+
 export function renderRowForm({ action, mode, fields, values = {}, error = '' }) {
   const submitLabel = mode === 'edit' ? 'Save row' : 'Insert row';
+  const visibleFields = mode === 'insert'
+    ? fields.filter((field) => field.name !== 'id')
+    : fields;
   return `<form method="post" action="${escapeAttr(action)}" class="stacked-form row-form">
     ${renderAlert(error)}
-    ${fields.map((field) => renderField(field, values[field.name], mode)).join('')}
+    ${visibleFields.map((field) => renderField(field, values[field.name], mode)).join('')}
     <div class="form-actions">
       <button type="submit">${escapeHtml(submitLabel)}</button>
     </div>
@@ -85,13 +124,46 @@ export function renderRowForm({ action, mode, fields, values = {}, error = '' })
 function renderField(field, value, mode) {
   const name = field.name;
   const type = field.type.toLowerCase();
-  const readonlyId = mode === 'edit' && name === 'id';
-  const control = type.includes('text') || type.includes('json')
-    ? `<textarea name="${escapeAttr(name)}" rows="3" ${readonlyId ? 'readonly' : ''}>${escapeHtml(valueToText(value))}</textarea>`
-    : `<input name="${escapeAttr(name)}" value="${escapeAttr(valueToText(value))}" ${readonlyId ? 'readonly' : ''}>`;
+  const readonlyId = name === 'id' && mode === 'edit';
+  const readonly = readonlyId ? 'readonly' : '';
+  const textValue = valueToText(value);
+  let control = '';
+
+  if (name === 'id') {
+    control = `<input name="${escapeAttr(name)}" value="${escapeAttr(textValue)}" inputmode="numeric" pattern="[0-9]*" ${readonly} placeholder="${mode === 'insert' ? 'Auto' : ''}">`;
+  } else if (type.includes('bool')) {
+    const checked = ['1', 'true', 'yes', 'on'].includes(String(textValue).toLowerCase()) ? 'checked' : '';
+    control = `<input type="hidden" name="${escapeAttr(name)}" value="0"><span class="checkbox-line"><input type="checkbox" name="${escapeAttr(name)}" value="1" ${checked}> <span>True</span></span>`;
+  } else if (type.includes('json')) {
+    control = `<textarea name="${escapeAttr(name)}" rows="6" data-json-input>${escapeHtml(textValue)}</textarea>`;
+  } else if (type.includes('timestamp')) {
+    control = `<input type="datetime-local" name="${escapeAttr(name)}" value="${escapeAttr(timestampInputValue(value))}">`;
+  } else if (type.includes('bigint')) {
+    control = `<input name="${escapeAttr(name)}" inputmode="numeric" pattern="-?[0-9]*" value="${escapeAttr(textValue)}">`;
+  } else if (type.includes('float')) {
+    control = `<input type="number" step="any" name="${escapeAttr(name)}" value="${escapeAttr(textValue)}">`;
+  } else if (type.includes('int') || type === 'uint') {
+    control = `<input type="number" step="1" name="${escapeAttr(name)}" value="${escapeAttr(textValue)}">`;
+  } else if (type.includes('multi')) {
+    control = `<textarea name="${escapeAttr(name)}" rows="3" placeholder="1,2,3 or [1,2,3]">${escapeHtml(textValue)}</textarea>`;
+  } else if (type.includes('text')) {
+    control = `<textarea name="${escapeAttr(name)}" rows="4">${escapeHtml(textValue)}</textarea>`;
+  } else {
+    control = `<input name="${escapeAttr(name)}" value="${escapeAttr(textValue)}">`;
+  }
 
   return `<label>
     <span>${escapeHtml(name)} <small>${escapeHtml(field.type)}${field.properties ? `, ${escapeHtml(field.properties)}` : ''}</small></span>
     ${control}
   </label>`;
+}
+
+function timestampInputValue(value) {
+  if (value === null || value === undefined || value === '') return '';
+  const raw = String(value);
+  const seconds = /^\d+$/.test(raw) ? Number(raw) : NaN;
+  const date = Number.isFinite(seconds) ? new Date(seconds * 1000) : new Date(raw);
+  if (!Number.isFinite(date.getTime())) return '';
+  const offset = date.getTimezoneOffset() * 60000;
+  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
 }

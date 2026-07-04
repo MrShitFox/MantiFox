@@ -1,13 +1,16 @@
 import {
   buildDeleteSql,
-  buildInsertSql,
-  buildReplaceSql,
+  collectJsonMessages,
   collectMessages,
   countRows,
   describeTable,
+  findTable,
   hasResultErrors,
+  insertDocument,
   listTables,
   ping,
+  replaceDocument,
+  requireRealtimeTable,
   runSql,
   selectRowById,
   selectRows,
@@ -157,13 +160,14 @@ async function handleRowsApi(req, res, url, connection, table, parts) {
     if (req.method === 'POST') {
       const body = await readJson(req);
       const values = body.values && typeof body.values === 'object' ? body.values : body;
+      await requireRealtimeTableForApi(connection, table, 'Insert row');
       const { results: schemaResults, fields } = await describeTable(connection, table);
       if (hasResultErrors(schemaResults)) {
         return sendJson(res, 400, { error: 'Could not read schema', messages: collectMessages(schemaResults), results: schemaResults });
       }
-      const sql = buildInsertSql(table, fields, values);
-      const results = await runSql(connection, sql);
-      return sendJson(res, hasResultErrors(results) ? 400 : 201, { results, messages: collectMessages(results), sql });
+      const result = await insertDocument(connection, table, fields, values);
+      const messages = collectJsonMessages(result);
+      return sendJson(res, messages.some((message) => message.type === 'error') ? 400 : 201, { result, messages });
     }
 
     return methodNotAllowed(res);
@@ -180,20 +184,34 @@ async function handleRowsApi(req, res, url, connection, table, parts) {
     if (req.method === 'PUT') {
       const body = await readJson(req);
       const values = body.values && typeof body.values === 'object' ? body.values : body;
+      await requireRealtimeTableForApi(connection, table, 'Edit row');
       const { results: schemaResults, fields } = await describeTable(connection, table);
       if (hasResultErrors(schemaResults)) {
         return sendJson(res, 400, { error: 'Could not read schema', messages: collectMessages(schemaResults), results: schemaResults });
       }
-      const sql = buildReplaceSql(table, rowId, fields, values);
-      const results = await runSql(connection, sql);
-      return sendJson(res, hasResultErrors(results) ? 400 : 200, { results, messages: collectMessages(results), sql });
+      const result = await replaceDocument(connection, table, rowId, fields, values);
+      const messages = collectJsonMessages(result);
+      return sendJson(res, messages.some((message) => message.type === 'error') ? 400 : 200, { result, messages });
     }
 
     if (req.method === 'DELETE') {
+      await requireRealtimeTableForApi(connection, table, 'Delete row');
       const results = await runSql(connection, buildDeleteSql(table, rowId));
       return sendJson(res, hasResultErrors(results) ? 400 : 200, { results, messages: collectMessages(results) });
     }
   }
 
   return sendJson(res, 404, { error: 'Not found' });
+}
+
+async function requireRealtimeTableForApi(connection, table, action) {
+  const { tables, results } = await listTables(connection);
+  const messages = collectMessages(results);
+  if (messages.some((message) => message.type === 'error')) {
+    throw Object.assign(new Error(messages.map((message) => message.message).join('\n')), { statusCode: 502 });
+  }
+  const tableMeta = findTable(tables, table);
+  if (!tableMeta) throw Object.assign(new Error('Table not found'), { statusCode: 404 });
+  requireRealtimeTable(tableMeta, action);
+  return tableMeta;
 }
