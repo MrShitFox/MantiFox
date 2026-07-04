@@ -161,9 +161,8 @@ async function handleTablePages(req, res, url, connection, parts) {
 }
 
 async function renderBrowse(req, res, url, connection, table) {
-  const page = clampInteger(url.searchParams.get('page'), 1, 1, 1000000);
+  let page = clampInteger(url.searchParams.get('page'), 1, 1, 1000000);
   const perPage = clampInteger(url.searchParams.get('perPage'), 25, 1, 200);
-  const offset = (page - 1) * perPage;
   const search = url.searchParams.get('q') || '';
   const dir = url.searchParams.get('dir') === 'desc' ? 'desc' : 'asc';
   let sort = url.searchParams.get('sort') || '';
@@ -174,10 +173,16 @@ async function renderBrowse(req, res, url, connection, table) {
     const validFields = new Set(schemaData.fields.map((field) => field.name));
     if (sort && !validFields.has(sort)) sort = '';
 
-    const [statusResults, rowsResults, countData] = await Promise.all([
+    // Resolve the row count first so the requested page can be clamped to the
+    // last real page (avoids "Page 999 of 2" and an offset past the last row).
+    const countData = await countRows(connection, table, search);
+    const maxPage = Math.max(1, Math.ceil(countData.total / perPage));
+    if (page > maxPage) page = maxPage;
+    const offset = (page - 1) * perPage;
+
+    const [statusResults, rowsResults] = await Promise.all([
       showTableStatus(connection, table),
-      selectRows(connection, table, { limit: perPage, offset, search, sort, dir }),
-      countRows(connection, table, search)
+      selectRows(connection, table, { limit: perPage, offset, search, sort, dir })
     ]);
 
     const messages = [

@@ -45,10 +45,20 @@ export function renderResultSets(results = []) {
 }
 
 export function renderStatusTable(resultSet) {
-  const row = resultSet?.data?.[0];
-  if (!row) return '';
-  return `<dl class="status-grid">${Object.entries(row).map(([key, value]) => `
-    <div><dt>${escapeHtml(key)}</dt><dd>${escapeHtml(valueToText(value))}</dd></div>
+  const rows = Array.isArray(resultSet?.data) ? resultSet.data : [];
+  if (!rows.length) return '';
+
+  // `SHOW TABLE <t> STATUS` returns one { Variable_name, Value } pair per row
+  // (dozens of them). Render every pair, not just the first row.
+  const looksLikeVariables = rows.every(
+    (row) => row && typeof row === 'object' && 'Variable_name' in row && 'Value' in row
+  );
+  const pairs = looksLikeVariables
+    ? rows.map((row) => [row.Variable_name, row.Value])
+    : Object.entries(rows[0]);
+
+  return `<dl class="status-grid">${pairs.map(([key, value]) => `
+    <div><dt>${escapeHtml(valueToText(key))}</dt><dd>${escapeHtml(valueToText(value))}</dd></div>
   `).join('')}</dl>`;
 }
 

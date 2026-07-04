@@ -182,6 +182,20 @@ and **"not intended for use in automated scripts. Use the /sql endpoint
 instead."** `/cli` also requires the Manticore Buddy component. We rely on
 `/sql?mode=raw` instead. (Listed here only so the agent knows to avoid them.)
 
+**64-bit integers — do NOT lose precision through JSON (verified against the
+node, report F2).** Manticore `id` and any `bigint` / `multi64` values are
+64-bit. Auto-generated ids are large (e.g. `8506583095909023745`), well above
+JavaScript's safe-integer limit (2^53). A plain `JSON.parse` of Manticore's
+response coerces these to float64 and silently corrupts them — the grid shows a
+rounded id, and Edit/Delete then hit a non-existent row; writes can also mangle
+bigint columns. Requirements:
+- When parsing Manticore JSON responses, preserve large integers losslessly
+  (e.g. wrap integer literals in the value position as strings before
+  `JSON.parse`, or use a bigint-aware parser). Treat `id` as an opaque string
+  throughout the app.
+- When *building* SQL/JSON that carries an id or bigint, format it from a
+  string / `BigInt`, never via `Number()`.
+
 ### 4.2 Introspection queries (run via `/sql?mode=raw`)
 
 - `SHOW TABLES` — list tables (rows: table name + type).
@@ -384,9 +398,33 @@ must disable (or clearly warn on) create/edit/alter actions instead of sending a
 doomed statement. `plain` tables are built from a config source via the
 `indexer` tool and cannot be created interactively.
 
-**Escaping:** the table name and column names come from user input. Validate
-identifiers against `^[A-Za-z_][A-Za-z0-9_]*$` before interpolating them into
-DDL; reject anything else rather than trying to escape it.
+**SQL value & identifier escaping (VERIFIED against the node — read carefully):**
+
+Manticore uses MySQL / SphinxQL-style **backslash** escaping in SQL string
+literals, NOT ANSI quote-doubling. Confirmed against the manual and the live node
+(report F1):
+
+- Escape a value that goes inside `'...'` by first replacing `\` with `\\`, then
+  `'` with `\'`. Example: `O'Brien` -> `O\'Brien`.
+- Do NOT use `'` -> `''` (ANSI doubling). Manticore parses `''` as two adjacent
+  string literals, so any value with an apostrophe throws a syntax error, and —
+  because `\` stays an active escape character — a value ending in `\` breaks out
+  of the literal and becomes an injection vector. (This corrects an earlier
+  version of this file; the fix already lives in `manticore.js` — **do not
+  revert it**.)
+- **Identifiers** (table / column names) are NOT escaped — validate them against
+  `^[A-Za-z_][A-Za-z0-9_]*$` and reject anything else rather than escaping.
+- **`MATCH()` has a second escaping layer.** Text placed inside `MATCH('...')`
+  is also a full-text query, so operators (`@ ( ) ! - | / ~ " ^ $ * =`) are
+  interpreted unless backslash-escaped. For a plain-text search box, escape both
+  layers: escape the full-text operators with a backslash, then apply the SQL
+  string-literal escaping above.
+- **Lower-risk alternative — prefer JSON for writes/search.** For row writes and
+  full-text search, prefer the JSON endpoints (`/insert`, `/replace`, `/update`,
+  `/delete`, `/search` with a `match` clause) over hand-built SQL. Values travel
+  as native JSON, so the SQL string-literal layer disappears entirely (the JSON
+  encoder escapes for you). Reserve raw SQL-string building for cases that truly
+  need it.
 
 ---
 
@@ -471,9 +509,10 @@ Keep it flatter if the app stays small — do not over-engineer folders.
   `AbortController` timeout. Central `runSql(conn, sql)` → `POST
   {conn.baseUrl}/sql?mode=raw` with the SQL as the raw body and the optional
   `Authorization` header; return the parsed JSON array of result sets. For row
-  edits, do NOT build SQL by naive concat with un-escaped user values — escape
-  strings (`'` -> `''`) and validate identifiers, or use the JSON CRUD
-  endpoints (4.3) for row writes.
+  edits, do NOT build SQL by naive concat with un-escaped user values — apply the
+  backslash escaping + identifier validation in §4.6 (NOT `'`->`''`), or use the
+  JSON CRUD endpoints (4.3) for row writes. Preserve 64-bit ids/bigints
+  losslessly (§4.1) — never round-trip them through `Number()`.
 - **HTML rendering:** plain template-literal functions returning strings. No JSX,
   no template engine. **Always HTML-escape** any value coming from Manticore or
   user input (`escapeHtml` in `html.js`) to prevent XSS.
@@ -577,8 +616,9 @@ like this actually breaks.
   connection-CRUD endpoints are guarded — an unauthenticated user must not be
   able to reach Manticore through this app.
 - Row insert/edit/delete and GUI-built DDL do NOT concatenate raw user values
-  into SQL. String values are escaped (`'` -> `''`) or the JSON CRUD endpoints
-  (4.3) are used; identifiers (table/column names) are validated against
+  into SQL. String values use the backslash escaping in §4.6 (`\`->`\\` then
+  `'`->`\'`, NOT `'`->`''`) or the JSON CRUD endpoints (4.3); identifiers
+  (table/column names) are validated against
   `^[A-Za-z_][A-Za-z0-9_]*$` and rejected otherwise.
 - Every value rendered into HTML (grid cells, connection names, error text, form
   values, SQL-console output) goes through `escapeHtml`.

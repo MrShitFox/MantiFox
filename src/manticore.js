@@ -4,6 +4,49 @@ import { columnNames } from './html.js';
 
 const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
+// Manticore ids and `bigint` columns are 64-bit; auto-assigned ids routinely
+// exceed 2^53 (e.g. 8506583095909023745). Plain JSON.parse coerces every number
+// to a float64 and silently rounds those, which corrupts the id shown in the
+// grid and the edit/delete links built from it. Quote integer literals that are
+// too large to represent exactly (only in value position, never inside a
+// string) so JSON.parse keeps them as exact strings.
+function quoteUnsafeIntegers(json) {
+  let out = '';
+  let inString = false;
+  for (let i = 0; i < json.length; i++) {
+    const ch = json[i];
+    if (inString) {
+      out += ch;
+      if (ch === '\\') out += json[++i] ?? '';
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') {
+      inString = true;
+      out += ch;
+      continue;
+    }
+    // Outside a string, digits only ever begin a JSON number token.
+    const startsNumber = (ch >= '0' && ch <= '9')
+      || (ch === '-' && json[i + 1] >= '0' && json[i + 1] <= '9');
+    if (startsNumber) {
+      let j = ch === '-' ? i + 1 : i;
+      while (j < json.length && json[j] >= '0' && json[j] <= '9') j++;
+      const isInteger = json[j] !== '.' && json[j] !== 'e' && json[j] !== 'E';
+      const token = json.slice(i, j);
+      out += isInteger && !Number.isSafeInteger(Number(token)) ? `"${token}"` : token;
+      i = j - 1;
+      continue;
+    }
+    out += ch;
+  }
+  return out;
+}
+
+export function parseManticoreJson(text) {
+  return JSON.parse(quoteUnsafeIntegers(text));
+}
+
 export function connectionBaseUrl(connection) {
   const host = connection.host.includes(':') && !connection.host.startsWith('[')
     ? `[${connection.host}]`
@@ -44,7 +87,7 @@ export async function manticoreRequest(connection, endpoint, options = {}) {
 
     if (text) {
       try {
-        payload = JSON.parse(text);
+        payload = parseManticoreJson(text);
       } catch {
         if (response.ok) {
           throw new Error(`Manticore returned non-JSON response: ${text}`);
@@ -75,11 +118,28 @@ export async function runSql(connection, sql) {
     body: String(sql)
   });
 
-  if (!Array.isArray(payload)) {
-    throw new Error('Manticore /sql?mode=raw returned an unexpected response shape');
+  if (Array.isArray(payload)) {
+    return payload;
   }
 
-  return payload;
+  // Some Manticore responses are not the result-set array: an error object like
+  // `{ "error": "P01: syntax error ..." }` (seen with HTTP 200 on some builds),
+  // or an empty body (seen for certain multi-statement runs). Surface the error
+  // through the normal result-set machinery and treat an empty body as "no
+  // result sets" instead of throwing a generic message that hides the cause.
+  if (payload && typeof payload === 'object' && (payload.error || payload.warning)) {
+    return [{
+      columns: [],
+      data: [],
+      total: 0,
+      error: payload.error || '',
+      warning: payload.warning || ''
+    }];
+  }
+
+  if (payload == null) return [];
+
+  throw new Error('Manticore /sql?mode=raw returned an unexpected response shape');
 }
 
 export async function ping(connection) {
@@ -112,7 +172,12 @@ export function quoteIdentifier(identifier) {
 }
 
 export function sqlString(value) {
-  return `'${String(value ?? '').replace(/'/g, "''")}'`;
+  // Manticore uses MySQL-style backslash escaping in string literals (verified
+  // against the server): SQL-standard quote doubling (`''`) is parsed as two
+  // adjacent strings, and a backslash escapes the following character. So a
+  // value ending in `\` with only quote-doubling would break out of the literal
+  // (SQL injection). Escape backslashes first, then single quotes.
+  return `'${String(value ?? '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`;
 }
 
 export function sqlIdLiteral(value) {
@@ -145,8 +210,13 @@ export function sqlLiteral(value, type = '') {
   }
 
   if (isNumericType(type)) {
-    if (!raw.trim()) return '0';
-    const numeric = Number(raw);
+    const trimmed = raw.trim();
+    if (!trimmed) return '0';
+    // Preserve integer literals exactly. Going through Number() would corrupt
+    // bigint values above 2^53; BigInt keeps full precision and still emits a
+    // digits-only literal (injection-safe).
+    if (/^[+-]?\d+$/.test(trimmed)) return String(BigInt(trimmed));
+    const numeric = Number(trimmed);
     if (!Number.isFinite(numeric)) {
       throw new Error(`Invalid numeric value: ${raw}`);
     }
