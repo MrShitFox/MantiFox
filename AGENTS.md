@@ -54,6 +54,11 @@ over pulling a library. Respect this hard.
   becomes genuinely unwieldy — ask first.)
 - Do NOT add a frontend SPA framework (React/Vue/Svelte/Angular) or any bundler
   (webpack/vite/esbuild/rollup). Use server-rendered HTML + one vanilla JS file.
+- Do NOT add a UI component library or its runtime — no MUI / `@mui/material`
+  (that is React), no `@material/web` / Material Web Components, no Bootstrap,
+  no Shoelace. The Material Design 3 look is implemented by hand as CSS tokens +
+  small vanilla JS (see §13). "Material 3" here means the **design language**,
+  not a component dependency.
 - Do NOT add an ORM (Prisma/Drizzle/TypeORM/Knex). Use `better-sqlite3` raw SQL.
 - Do NOT add an auth/session library (passport, express-session, jsonwebtoken).
   Use `node:crypto` + a signed cookie.
@@ -650,3 +655,192 @@ like this actually breaks.
 
 Report findings as a short list of `{file, issue, severity, fix}`; fix the
 high/critical items in the same session and list the rest.
+
+---
+
+## 13. Material Design 3 design system (vanilla CSS, no deps)
+
+The UI must look and feel like **Material Design 3 (Material You)** — cohesive
+color, type, shape, elevation, motion — implemented entirely as hand-authored
+CSS custom properties + small vanilla JS. No component library (see §2). All
+token values below are verified against the M3 spec / Material tokens; use them
+verbatim so the system stays coherent.
+
+Put tokens in `public/tokens.css` (`:root` for light, a `[data-theme="dark"]`
+selector on `<html>` for dark) and component styles in `public/styles.css`.
+Reference tokens everywhere; never hardcode a raw color/size in component CSS.
+
+### 13.1 Color — generate once, commit as static CSS (do NOT hand-invent hex)
+
+M3 color roles are derived from tonal palettes via the HCT color space. Do not
+try to compute palettes by hand — you will get them subtly wrong. Instead:
+
+1. Generate the scheme once from a single seed color using **Material Theme
+   Builder** (https://m3.material.io/theme-builder, "Export → Web (CSS)") or the
+   `material-color-utilities` package run as a one-off generator.
+2. Commit the exported CSS as `public/tokens.css`. This is a **build-time /
+   one-off** step — the app ships the static CSS and has **no runtime
+   dependency**. Do not wire the generator into the app or a build step.
+
+Emit the full set of role tokens as `--md-sys-color-<role>` for BOTH light and
+dark. Complete role list (must all be present):
+
+```
+primary  on-primary  primary-container  on-primary-container
+secondary  on-secondary  secondary-container  on-secondary-container
+tertiary  on-tertiary  tertiary-container  on-tertiary-container
+error  on-error  error-container  on-error-container
+surface  on-surface  surface-variant  on-surface-variant
+surface-dim  surface-bright
+surface-container-lowest  surface-container-low  surface-container
+surface-container-high  surface-container-highest
+background  on-background
+outline  outline-variant
+inverse-surface  inverse-on-surface  inverse-primary
+surface-tint  shadow  scrim
+```
+
+Role→tone mapping (for reference / sanity-checking the export): in light,
+`primary`=tone40, `on-primary`=tone100, `primary-container`=tone90,
+`on-primary-container`=tone10; in dark those become tone80 / tone20 / tone30 /
+tone90 respectively. Same pattern for secondary/tertiary/error.
+
+Baseline seed to start with (if the owner has no brand color): `#6750A4`
+(the M3 default). Regenerating with a different seed later is a one-file swap.
+
+Usage: page background = `surface`; text = `on-surface`; cards/menus/dialogs use
+the `surface-container*` roles (higher container = more "raised"); primary
+actions use `primary` / `on-primary`; the SQL console and code use
+`surface-container` + `on-surface`; errors/warnings use `error-container` /
+`on-error-container`.
+
+### 13.2 Typography — M3 type scale (Roboto)
+
+Load Roboto + Material Symbols via one `<link>` each (Google Fonts CDN is a
+static asset link, not a JS dependency). Define each role as a token bundle and
+apply per element. Values are `size / line-height / weight / letter-spacing`:
+
+```
+display-large    57px / 64px / 400 / -0.25px
+display-medium   45px / 52px / 400 /  0
+display-small    36px / 44px / 400 /  0
+headline-large   32px / 40px / 400 /  0
+headline-medium  28px / 36px / 400 /  0
+headline-small   24px / 32px / 400 /  0
+title-large      22px / 28px / 400 /  0
+title-medium     16px / 24px / 500 /  0.15px
+title-small      14px / 20px / 500 /  0.1px
+body-large       16px / 24px / 400 /  0.5px
+body-medium      14px / 20px / 400 /  0.25px
+body-small       12px / 16px / 400 /  0.4px
+label-large      14px / 20px / 500 /  0.1px
+label-medium     12px / 16px / 500 /  0.5px
+label-small      11px / 16px / 500 /  0.5px
+```
+
+Rough mapping for this app: page/section titles → headline-small / title-large;
+table headers → title-small; table cells and form text → body-medium; buttons
+and chips → label-large; helper/caption text → body-small.
+
+### 13.3 Shape — corner radius scale
+
+```
+none 0   extra-small 4px   small 8px   medium 12px   large 16px
+extra-large 28px   full 9999px (pill)
+```
+
+Component defaults: buttons, chips-as-actions, FAB target → `full`; cards,
+menus, snackbars → `medium` (12); text fields (filled) → `extra-small` top
+corners only (4 4 0 0); dialogs, bottom sheets → `extra-large` (28); large
+containers/panels → `large` (16).
+
+### 13.4 Elevation — 6 levels (shadow-based)
+
+Levels 0–5 (dp 0 / 1 / 3 / 6 / 8 / 12). Use these exact box-shadows:
+
+```
+level0: none
+level1: 0 1px 2px 0 rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15)
+level2: 0 1px 2px 0 rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15)
+level3: 0 1px 3px 0 rgba(0,0,0,.30), 0 4px 8px 3px rgba(0,0,0,.15)
+level4: 0 2px 3px 0 rgba(0,0,0,.30), 0 6px 10px 4px rgba(0,0,0,.15)
+level5: 0 4px 4px 0 rgba(0,0,0,.30), 0 8px 12px 6px rgba(0,0,0,.15)
+```
+
+Typical: cards/raised surfaces = level1 (rest) → level2 or 3 on hover; menus =
+level2; dialogs = level3; FAB = level3 (→ level4 on hover); nav drawer = level1.
+
+### 13.5 Motion — easing + duration tokens (the heart of "animations")
+
+Easing (cubic-bezier), verified against M3:
+
+```
+standard              cubic-bezier(0.2, 0, 0, 1)
+standard-accelerate   cubic-bezier(0.3, 0, 1, 1)
+standard-decelerate   cubic-bezier(0, 0, 0, 1)
+emphasized            cubic-bezier(0.2, 0, 0, 1)      /* single-bezier fallback */
+emphasized-decelerate cubic-bezier(0.05, 0.7, 0.1, 1)
+emphasized-accelerate cubic-bezier(0.3, 0, 0.8, 0.15)
+```
+
+Durations:
+
+```
+short1 50   short2 100  short3 150  short4 200
+medium1 250 medium2 300 medium3 350 medium4 400
+long1 450   long2 500   long3 550   long4 600
+extra-long1 700 … extra-long4 1000  (ms)
+```
+
+Which to use:
+- Small state changes (hover/press/focus state layers, ripples, switches):
+  `short2`–`short4` with `standard`.
+- Enters (dialogs, menus, snackbars, expanding rows): `medium2`–`medium4` with
+  `emphasized-decelerate`. Exits: one step shorter with `emphasized-accelerate`.
+- Element position/size changes across the screen: `emphasized`.
+- Keep routine web UI snappy (150–300ms); avoid parallax and heavy blur; animate
+  `transform`/`opacity`, not layout properties.
+
+### 13.6 State layers & ripple
+
+Interactive elements get a **state layer**: an overlay of the element's "on"
+color at these opacities (M3): hover `0.08`, focus `0.10`, pressed `0.10`,
+dragged `0.16`. Implement as an `::before`/overlay tinted with the on-color and
+transitioned with `short` + `standard`. Add a **ripple** on press for buttons,
+list rows, icon buttons, chips, tabs — a small vanilla JS helper that spawns an
+expanding circle from the pointer position, colored with the on-color at ~12%,
+fading over `long1`. Focus states must remain visible with keyboard (`:focus-visible`).
+
+### 13.7 Components to build (map to existing screens)
+
+Style these as MD3, reusing token vars: top app bar (with title + actions);
+navigation rail or drawer for connection/table navigation; buttons — filled
+(primary actions), tonal (secondary), outlined, text; FAB or extended FAB for
+the primary "add" action (add connection / create table); cards for the
+connection list and the table list (surface-container, level1, medium radius);
+text fields — filled and/or outlined, with floating label, helper/error text,
+and the required focus/error state colors; dropdown menus and the type-select in
+the create-table form; chips for table-type / column-property tags; dialogs
+(extra-large radius, level3, scrim) for the destructive-action confirmations and
+the SQL preview; snackbar/toast for transient success/error; a Material-styled
+data table for the browse grid (dense rows, on-surface-variant headers, hover
+state layer on rows); switches/checkboxes for `bool` inputs. Icons: Material
+Symbols.
+
+### 13.8 Accessibility & polish (required, not optional)
+
+- Honor `@media (prefers-reduced-motion: reduce)`: disable/last-frame all
+  transitions, ripples, and entrance animations.
+- Respect `prefers-color-scheme` for the initial light/dark choice; also allow a
+  manual toggle that sets `data-theme` on `<html>`. (Persisting the choice
+  server-side is fine; do NOT use localStorage in a way that breaks without JS.)
+- Contrast comes for free if you pair each surface with its matching `on-` role;
+  never put `on-surface` text on a `primary` fill, etc.
+- Minimum 48x48px touch/click targets for interactive controls.
+- Keep the SQL console and result grid readable — this is a data tool first; MD3
+  styling must not reduce information density to the point of being annoying.
+
+Definition of done for this iteration: the app is visually coherent MD3 across
+all screens, light+dark, with tasteful entrance/state/ripple motion, and still
+passes everything in §12 (no dependency added, no build step, no regressions to
+the escaping/bigint/auth fixes).
