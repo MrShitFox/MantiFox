@@ -1,0 +1,17 @@
+{
+  "name": "mantifox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Self-hosted web admin GUI for Manticore Search",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1"
+  }
+}
