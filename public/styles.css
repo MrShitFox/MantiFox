@@ -352,13 +352,9 @@ h2 {
 .dashboard-grid,
 .browse-grid {
   display: grid;
-  grid-template-columns: minmax(320px, 0.85fr) minmax(0, 1.6fr);
+  grid-template-columns: minmax(240px, 0.35fr) minmax(0, 1fr);
   gap: 1rem;
   align-items: start;
-}
-
-.browse-grid {
-  grid-template-columns: minmax(240px, 0.35fr) minmax(0, 1fr);
 }
 
 .stacked-form,
@@ -670,7 +666,10 @@ tr:last-child td {
   .browse-grid,
   .two-cols,
   .vector-options {
-    grid-template-columns: 1fr;
+    /* minmax(0, …), not bare 1fr: a bare 1fr track cannot shrink below the
+       content min-width, so wide data grids forced page-level horizontal
+       scroll on small screens. */
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .page-heading {

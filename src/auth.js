@@ -29,7 +29,15 @@ function parseCookies(header) {
     if (index === -1) continue;
     const name = part.slice(0, index).trim();
     const value = part.slice(index + 1).trim();
-    if (name) cookies.set(name, decodeURIComponent(value));
+    // A cookie with broken percent-encoding must read as "no session",
+    // not throw URIError and turn every request into a 500.
+    if (name) {
+      try {
+        cookies.set(name, decodeURIComponent(value));
+      } catch {
+        cookies.set(name, value);
+      }
+    }
   }
   return cookies;
 }

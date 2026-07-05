@@ -116,8 +116,7 @@ export function renderBrowsePage({
 
 export function renderCreateTablePage({ connection, values = {}, previewSql = '', showExecute = false, error = '' }) {
   const columns = createColumnsFromValues(values);
-  const count = Math.max(columns.length, Number.parseInt(String(values.column_count || '0'), 10) || 0, 1);
-  while (columns.length < count) columns.push({});
+  const count = columns.length;
 
   return layout({
     title: `Create table - ${connection.name}`,
@@ -346,11 +345,17 @@ function renderColumnBuilderRow({ column = {}, index, mode }) {
 }
 
 function createColumnsFromValues(values) {
+  const posted = Object.prototype.hasOwnProperty.call(values, 'column_count');
   const count = Math.max(Number.parseInt(String(values.column_count || '0'), 10) || 0, 1);
   const columns = [];
   for (let index = 0; index < count; index++) {
     const prefix = `col_${index}_`;
     const hasPostedType = Object.prototype.hasOwnProperty.call(values, `${prefix}type`);
+    // Rows removed in the browser leave a gap in the col_N_* numbering while
+    // column_count keeps the old total. Re-rendering that gap produced a ghost
+    // empty-but-required column row that blocked the form. Skip gaps; the
+    // remaining columns are re-indexed by their array position.
+    if (posted && !hasPostedType && !values[`${prefix}name`]) continue;
     const defaultType = index === 0 ? 'text' : 'string';
     const type = values[`${prefix}type`] || defaultType;
     columns.push({
@@ -365,6 +370,7 @@ function createColumnsFromValues(values) {
       hnsw_similarity: values[`${prefix}hnsw_similarity`] || 'l2'
     });
   }
+  if (!columns.length) columns.push({ type: 'text', indexed: true, stored: true });
   return columns;
 }
 

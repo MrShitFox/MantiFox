@@ -223,28 +223,32 @@ export function hasResultErrors(results) {
   return collectMessages(results).some((message) => message.type === 'error');
 }
 
+function badInput(message) {
+  return Object.assign(new Error(message), { statusCode: 400 });
+}
+
 export function validateIdentifier(identifier) {
   const raw = String(identifier || '').trim();
-  if (!raw) throw new Error('Identifier is required');
+  if (!raw) throw badInput('Identifier is required');
   if (!identifierPattern.test(raw)) {
-    throw new Error(`Invalid SQL identifier: ${raw}`);
+    throw badInput(`Invalid SQL identifier: ${raw}`);
   }
   return raw;
 }
 
 export function quoteIdentifier(identifier) {
   const raw = String(identifier || '').trim();
-  if (!raw) throw new Error('Identifier is required');
+  if (!raw) throw badInput('Identifier is required');
   return raw.split('.').map((part) => {
     if (!identifierPattern.test(part)) {
-      throw new Error(`Invalid SQL identifier: ${raw}`);
+      throw badInput(`Invalid SQL identifier: ${raw}`);
     }
     return `\`${part}\``;
   }).join('.');
 }
 
 export function escapeMatchQuery(value) {
-  return String(value ?? '').replace(/([\\@()!\-|/~"^$*=])/g, '\\$1');
+  return String(value ?? '').replace(/([\\@()!\-|/~"^$*=<'])/g, '\\$1');
 }
 
 export function sqlString(value) {
@@ -259,7 +263,7 @@ export function sqlString(value) {
 export function sqlIdLiteral(value) {
   const raw = String(value ?? '').trim();
   if (!/^\d+$/.test(raw)) {
-    throw new Error('Row id must be an unsigned integer');
+    throw badInput('Row id must be an unsigned integer');
   }
   return raw;
 }
@@ -325,7 +329,10 @@ export async function selectRows(connection, table, options = {}) {
   const limit = Math.min(Math.max(Number.parseInt(options.limit || 25, 10) || 25, 1), 200);
   const offset = Math.max(Number.parseInt(options.offset || 0, 10) || 0, 0);
   const sort = options.sort ? ` ORDER BY ${quoteIdentifier(options.sort)} ${options.dir === 'desc' ? 'DESC' : 'ASC'}` : '';
-  const sql = `SELECT * FROM ${quoteIdentifier(table)}${searchWhere(options.search || '')}${sort} LIMIT ${offset}, ${limit}`;
+  // Manticore rejects OFFSET past max_matches (default 1000), which kills
+  // pagination beyond row 1000; raise it to exactly what this page needs.
+  const maxMatches = offset + limit > 1000 ? ` OPTION max_matches=${offset + limit}` : '';
+  const sql = `SELECT * FROM ${quoteIdentifier(table)}${searchWhere(options.search || '')}${sort} LIMIT ${offset}, ${limit}${maxMatches}`;
   return runSql(connection, sql);
 }
 
@@ -677,10 +684,13 @@ function valueForJsonDoc(field, value) {
   }
   if (type.includes('float')) return floatJsonValue(value, label);
   if (type.includes('json')) return jsonAttributeValue(value, label);
-  if (type.includes('multi64')) {
+  // DESC reports MVA columns as `mva` / `mva64`, not `multi` / `multi64`;
+  // accept both spellings or every row write on such tables fails with
+  // "non-MVA value specified for a MVA column".
+  if (type.includes('multi64') || type.includes('mva64')) {
     return parseArrayInput(value, label).map((item) => integerJsonValue(item, { signed: true, label }));
   }
-  if (type.includes('multi')) {
+  if (type.includes('multi') || type.includes('mva')) {
     return parseArrayInput(value, label).map((item) => integerJsonValue(item, { signed: false, label }));
   }
   return String(value ?? '');

@@ -107,13 +107,27 @@ export function renderSqlPreviewForm({
   </section>`;
 }
 
+function isUnreadableField(field) {
+  const type = String(field.type || '').toLowerCase();
+  const properties = String(field.properties || '').toLowerCase();
+  return type.includes('text') && !properties.includes('stored');
+}
+
 export function renderRowForm({ action, mode, fields, values = {}, error = '' }) {
   const submitLabel = mode === 'edit' ? 'Save row' : 'Insert row';
   const visibleFields = mode === 'insert'
     ? fields.filter((field) => field.name !== 'id')
     : fields;
+  // Saving REPLACEs the whole document, but indexed-only (non-stored) text
+  // fields cannot be read back, so the form starts empty for them and saving
+  // silently erases their indexed content. Warn instead of losing data quietly.
+  const unreadable = mode === 'edit' ? fields.filter(isUnreadableField).map((field) => field.name) : [];
+  const unreadableWarning = unreadable.length
+    ? renderAlert(`${unreadable.join(', ')}: indexed but not stored, so the current value cannot be shown. Saving replaces the whole row - leaving ${unreadable.length === 1 ? 'this field' : 'these fields'} empty erases ${unreadable.length === 1 ? 'its' : 'their'} indexed content.`, 'warning')
+    : '';
   return `<form method="post" action="${escapeAttr(action)}" class="stacked-form row-form">
     ${renderAlert(error)}
+    ${unreadableWarning}
     ${visibleFields.map((field) => renderField(field, values[field.name], mode)).join('')}
     <div class="form-actions">
       <button type="submit">${escapeHtml(submitLabel)}</button>
@@ -137,15 +151,20 @@ function renderField(field, value, mode) {
   } else if (type.includes('json')) {
     control = `<textarea name="${escapeAttr(name)}" rows="6" data-json-input>${escapeHtml(textValue)}</textarea>`;
   } else if (type.includes('timestamp')) {
-    control = `<input type="datetime-local" name="${escapeAttr(name)}" value="${escapeAttr(timestampInputValue(value))}">`;
+    control = `<input type="datetime-local" step="1" name="${escapeAttr(name)}" value="${escapeAttr(timestampInputValue(value))}">`;
+  } else if (type.includes('float_vector')) {
+    // Must be checked before float/int: DESC reports the type as float_vector
+    // and a number input cannot hold a comma-separated vector.
+    control = `<textarea name="${escapeAttr(name)}" rows="3" placeholder="0.1,0.2,0.3 or [0.1,0.2,0.3]">${escapeHtml(textValue)}</textarea>`;
+  } else if (type.includes('multi') || type.includes('mva')) {
+    // DESC reports MVA columns as mva / mva64.
+    control = `<textarea name="${escapeAttr(name)}" rows="3" placeholder="1,2,3 or [1,2,3]">${escapeHtml(textValue)}</textarea>`;
   } else if (type.includes('bigint')) {
     control = `<input name="${escapeAttr(name)}" inputmode="numeric" pattern="-?[0-9]*" value="${escapeAttr(textValue)}">`;
   } else if (type.includes('float')) {
     control = `<input type="number" step="any" name="${escapeAttr(name)}" value="${escapeAttr(textValue)}">`;
   } else if (type.includes('int') || type === 'uint') {
     control = `<input type="number" step="1" name="${escapeAttr(name)}" value="${escapeAttr(textValue)}">`;
-  } else if (type.includes('multi')) {
-    control = `<textarea name="${escapeAttr(name)}" rows="3" placeholder="1,2,3 or [1,2,3]">${escapeHtml(textValue)}</textarea>`;
   } else if (type.includes('text')) {
     control = `<textarea name="${escapeAttr(name)}" rows="4">${escapeHtml(textValue)}</textarea>`;
   } else {
@@ -165,5 +184,7 @@ function timestampInputValue(value) {
   const date = Number.isFinite(seconds) ? new Date(seconds * 1000) : new Date(raw);
   if (!Number.isFinite(date.getTime())) return '';
   const offset = date.getTimezoneOffset() * 60000;
-  return new Date(date.getTime() - offset).toISOString().slice(0, 16);
+  // Keep seconds (slice to :SS, input has step="1"); cutting at minutes made
+  // an untouched edit save round a stored timestamp down.
+  return new Date(date.getTime() - offset).toISOString().slice(0, 19);
 }

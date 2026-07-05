@@ -54,6 +54,11 @@ over pulling a library. Respect this hard.
   becomes genuinely unwieldy — ask first.)
 - Do NOT add a frontend SPA framework (React/Vue/Svelte/Angular) or any bundler
   (webpack/vite/esbuild/rollup). Use server-rendered HTML + one vanilla JS file.
+- Do NOT add a UI component library or its runtime — no MUI / `@mui/material`
+  (that is React), no `@material/web` / Material Web Components, no Bootstrap,
+  no Shoelace. The Material Design 3 look is implemented by hand as CSS tokens +
+  small vanilla JS (see §13). "Material 3" here means the **design language**,
+  not a component dependency.
 - Do NOT add an ORM (Prisma/Drizzle/TypeORM/Knex). Use `better-sqlite3` raw SQL.
 - Do NOT add an auth/session library (passport, express-session, jsonwebtoken).
   Use `node:crypto` + a signed cookie.
@@ -112,9 +117,15 @@ non-default HTTP port on purpose.
 
 **`POST /sql?mode=raw` — THE main endpoint. Use it for almost everything.**
 
-- Accepts: **any valid SQL**, including multi-queries separated by `;`
+- Accepts: **any single valid SQL statement**
   (SELECT, SHOW, DESC/DESCRIBE, CREATE, ALTER, INSERT, REPLACE, UPDATE, DELETE,
   TRUNCATE, etc.).
+- **Send ONE statement per request.** Multi-statement input (two statements
+  separated by `;`, e.g. `SELECT 1; SELECT 2`) is unreliable here: verified
+  twice against the node, it returns a syntax error. The manual lists
+  multi-statement as a feature, but it does not work dependably across versions,
+  so do not build on it — the SQL console must split input and submit statements
+  one at a time (or accept only one).
 - Request body (POST): either
   - raw plain-text SQL as the body — do **NOT** URL-encode it; or
   - `mode=raw&query=<URL-ENCODED-SQL>` as a urlencoded body; or
@@ -212,6 +223,27 @@ bigint columns. Requirements:
 - Smoke/health check for a saved connection: `POST /sql?mode=raw` body
   `SELECT 1` (or `SHOW TABLES`); a 200 with no `error` means the node is up.
 
+**`DESC` type vocabulary — key your type-mapping off what `DESC` prints, not the
+`CREATE` keyword (verified, report bug #1).** The names `DESC` returns differ
+from the `CREATE TABLE` keywords in places:
+- Multi-valued attributes: `DESC` prints **`mva`** and **`mva64`**, whereas
+  `CREATE` historically uses `multi` / `multi64` (both spellings now accepted by
+  `CREATE`). Any code that maps a column to a form control / value formatter must
+  match the `DESC` spelling — accept `mva`/`mva64` **and** `multi`/`multi64`.
+- Integers: `int` / `integer` columns print as **`uint`** in `DESC`.
+- Full-text: a `text` column prints as `text` with `Properties` like
+  `indexed stored`; `id` prints as `bigint`.
+When in doubt, create a throwaway table with each type and read `DESC` — do not
+assume the `CREATE` keyword round-trips.
+
+**Browsing & pagination — `max_matches` (verified, report bug #2).** Manticore's
+default `max_matches` is **1000**: a `SELECT ... LIMIT <offset>, <n>` whose
+`offset + n` exceeds 1000 fails with an "offset out of bounds" error, which
+otherwise kills the browse grid past row 1000. To page deeper, add
+`OPTION max_matches=<offset+n>` (only when needed). Note `max_matches` results
+are held in memory per query, so clamp it to something sane; do not let a user
+jump to offset 10,000,000.
+
 ### 4.3 JSON data endpoints (OPTIONAL — for structured row CRUD)
 
 Prefer building INSERT/UPDATE/DELETE as SQL through `/sql?mode=raw`. These JSON
@@ -247,6 +279,40 @@ key, `index` is accepted as a legacy alias):
 Elasticsearch-compatible endpoints (`/{table}/_doc`, `/{table}/_create`,
 `/_bulk`, `/{table}/_update/{id}`, etc.) also exist for migration scenarios —
 not needed here.
+
+**Editing rows: UPDATE vs REPLACE, and silent data loss (verified, report bug
+#5 — this shapes the whole row editor).** Manticore has two very different write
+paths:
+
+- **UPDATE** (`/update`, or `UPDATE ... SET`) changes attribute values
+  **in place**. It can only touch row-wise attributes (int, bigint, float, bool,
+  timestamp, string, json, MVA). It **cannot** change a full-text (`text`) field's
+  content or a columnar attribute, and cannot change `id`. It does not disturb
+  any other field. (Side note: updating an attribute disables its secondary
+  index for that column.)
+- **REPLACE** (`/replace`, or `REPLACE INTO`) deletes the old document and
+  inserts a **whole new one**. It is the ONLY way to change full-text field
+  content (it reindexes). Because it is a full-document write, **any field you do
+  not include is lost.**
+
+The trap: a full-text field declared `text indexed` **without** `stored` cannot
+be read back (its original value isn't retained). So an editor that loads a row,
+shows that field blank (because it can't be read), and then `REPLACE`s the row
+will **silently and permanently destroy** that field's content — even if the
+user changed nothing. Design rules for the row editor:
+
+- For an edit that only changes attributes, use **UPDATE** — safe and in-place.
+  Do not `REPLACE` just to change a price.
+- Only use **REPLACE** when a `text` field's content actually changed, and then
+  you must resend every field you want to keep.
+- If the table has any non-stored full-text field, **warn the user** that
+  editing that row risks wiping it (you cannot preserve it transparently — the
+  value is unreadable). Better: recommend declaring full-text fields `stored`
+  (the default) if the table is meant to be edited through the GUI.
+- "Partial REPLACE" (`REPLACE INTO t (id, col) SELECT ...` or
+  `POST /{table}/_update/{id}`) can change specific fields, but it requires ALL
+  fields in the table to be `stored` and needs Manticore Buddy — do not rely on
+  it as the primary path.
 
 ### 4.4 Authentication (only if the target Manticore has it enabled)
 
@@ -401,7 +467,9 @@ doomed statement. `plain` tables are built from a config source via the
 **SQL value & identifier escaping (VERIFIED against the node — read carefully):**
 
 Manticore uses MySQL / SphinxQL-style **backslash** escaping in SQL string
-literals, NOT ANSI quote-doubling. Confirmed against the manual and the live node
+literals, NOT ANSI quote-doubling. Manticore also does **not** support
+double-quoted string literals, so you cannot dodge apostrophe-escaping by
+switching to `"..."`. Confirmed against the manual and the live node
 (report F1):
 
 - Escape a value that goes inside `'...'` by first replacing `\` with `\\`, then
@@ -629,24 +697,306 @@ like this actually breaks.
   browser in HTML or JSON.
 
 **Correctness / robustness:**
-- `error` AND `warning` from every result set are surfaced, never swallowed. In
-  a multi-statement console run, a failure reports which statement failed.
+- `error` AND `warning` from every result set are surfaced, never swallowed.
+- The SQL console submits **one statement per request** (multi-statement over
+  `/sql?mode=raw` is unreliable, §4.1); if a user pastes several, split them or
+  run only one, and report which one errored.
 - A dead/unreachable node (wrong host/port, timeout) produces a clean UI error,
   not a crash or endless spinner; `fetch` uses an `AbortController` timeout.
 - Empty states render: 0-row table, 0-table node, SELECT with no columns,
   non-`rt` table (edit/alter disabled or warned).
 - Pagination is correct at boundaries (first/last page, total not a multiple of
   page size); LIMIT/OFFSET are integers, never interpolated user strings.
+  Browsing past row 1000 works (adds `OPTION max_matches`, §4.2, bug #2), and
+  `page` is clamped to the last valid page.
+- Column type-mapping keys off the `DESC` spelling, so tables with MVA columns
+  (`DESC` shows `mva`/`mva64`) are insertable/editable, not 409-rejected (bug #1).
+- Editing a row uses UPDATE for attribute-only changes and REPLACE only when a
+  full-text field changed; the editor warns before it can wipe a non-stored
+  `text` field (§4.3, bug #5). `timestamp` inputs preserve seconds.
 - Oversized request bodies are rejected, not buffered unbounded.
-- `id` is read-only in edit forms and never sent inside the editable `doc`.
+- `id` is read-only in edit forms and never sent inside the editable `doc`;
+  64-bit ids stay exact (strings, never `Number()` — §4.1).
+- A malformed session cookie yields "no session" (401/redirect), not a 500.
 
 **UX (the point of this iteration):**
 - Destructive actions (DROP TABLE, TRUNCATE, DROP COLUMN, DELETE row) require a
   confirm step and show the exact statement that will run.
 - Row forms use type-aware inputs (checkbox for `bool`, number for int/float,
-  datetime for `timestamp`, validated textarea for `json`, etc.).
+  datetime-with-seconds for `timestamp`, validated textarea for `json`). `multi`
+  / `multi64` (MVA) and `float_vector` use a **textarea with a format hint**
+  (comma-separated values), never a single `number` input (bug #3).
+- The edit form surfaces the non-stored-field data-loss warning (§4.3) when
+  relevant, rather than silently destroying content.
 - Common tasks (create table, add/drop column, drop/truncate, full row CRUD) are
   reachable from the GUI without opening the SQL console.
 
 Report findings as a short list of `{file, issue, severity, fix}`; fix the
 high/critical items in the same session and list the rest.
+
+---
+
+## 13. Material Design 3 design system (vanilla CSS, no deps)
+
+The UI must look and feel like **Material Design 3 (Material You)** — cohesive
+color, type, shape, elevation, motion — implemented entirely as hand-authored
+CSS custom properties + small vanilla JS. No component library (see §2). All
+token values below are verified against the M3 spec / Material tokens; use them
+verbatim so the system stays coherent.
+
+Put tokens in `public/tokens.css` (`:root` for light, a `[data-theme="dark"]`
+selector on `<html>` for dark) and component styles in `public/styles.css`.
+Reference tokens everywhere; never hardcode a raw color/size in component CSS.
+
+### 13.1 Color — generate once, commit as static CSS (do NOT hand-invent hex)
+
+M3 color roles are derived from tonal palettes via the HCT color space. Do not
+try to compute palettes by hand — you will get them subtly wrong. Instead:
+
+1. Generate the scheme once from a single seed color using **Material Theme
+   Builder** (https://m3.material.io/theme-builder, "Export → Web (CSS)") or the
+   `material-color-utilities` package run as a one-off generator.
+2. Commit the exported CSS as `public/tokens.css`. This is a **build-time /
+   one-off** step — the app ships the static CSS and has **no runtime
+   dependency**. Do not wire the generator into the app or a build step.
+
+Emit the full set of role tokens as `--md-sys-color-<role>` for BOTH light and
+dark. Complete role list (must all be present):
+
+```
+primary  on-primary  primary-container  on-primary-container
+secondary  on-secondary  secondary-container  on-secondary-container
+tertiary  on-tertiary  tertiary-container  on-tertiary-container
+error  on-error  error-container  on-error-container
+surface  on-surface  surface-variant  on-surface-variant
+surface-dim  surface-bright
+surface-container-lowest  surface-container-low  surface-container
+surface-container-high  surface-container-highest
+background  on-background
+outline  outline-variant
+inverse-surface  inverse-on-surface  inverse-primary
+surface-tint  shadow  scrim
+```
+
+Role→tone mapping (for reference / sanity-checking the export): in light,
+`primary`=tone40, `on-primary`=tone100, `primary-container`=tone90,
+`on-primary-container`=tone10; in dark those become tone80 / tone20 / tone30 /
+tone90 respectively. Same pattern for secondary/tertiary/error.
+
+Baseline seed to start with (if the owner has no brand color): `#6750A4`
+(the M3 default). Regenerating with a different seed later is a one-file swap.
+
+Usage: page background = `surface`; text = `on-surface`; cards/menus/dialogs use
+the `surface-container*` roles (higher container = more "raised"); primary
+actions use `primary` / `on-primary`; the SQL console and code use
+`surface-container` + `on-surface`; errors/warnings use `error-container` /
+`on-error-container`.
+
+### 13.2 Typography — M3 type scale (Roboto)
+
+Load Roboto + Material Symbols via one `<link>` each (Google Fonts CDN is a
+static asset link, not a JS dependency). Define each role as a token bundle and
+apply per element. Values are `size / line-height / weight / letter-spacing`:
+
+```
+display-large    57px / 64px / 400 / -0.25px
+display-medium   45px / 52px / 400 /  0
+display-small    36px / 44px / 400 /  0
+headline-large   32px / 40px / 400 /  0
+headline-medium  28px / 36px / 400 /  0
+headline-small   24px / 32px / 400 /  0
+title-large      22px / 28px / 400 /  0
+title-medium     16px / 24px / 500 /  0.15px
+title-small      14px / 20px / 500 /  0.1px
+body-large       16px / 24px / 400 /  0.5px
+body-medium      14px / 20px / 400 /  0.25px
+body-small       12px / 16px / 400 /  0.4px
+label-large      14px / 20px / 500 /  0.1px
+label-medium     12px / 16px / 500 /  0.5px
+label-small      11px / 16px / 500 /  0.5px
+```
+
+Rough mapping for this app: page/section titles → headline-small / title-large;
+table headers → title-small; table cells and form text → body-medium; buttons
+and chips → label-large; helper/caption text → body-small.
+
+### 13.3 Shape — corner radius scale
+
+```
+none 0   extra-small 4px   small 8px   medium 12px   large 16px
+extra-large 28px   full 9999px (pill)
+```
+
+Component defaults: buttons, chips-as-actions, FAB target → `full`; cards,
+menus, snackbars → `medium` (12); text fields (filled) → `extra-small` top
+corners only (4 4 0 0); dialogs, bottom sheets → `extra-large` (28); large
+containers/panels → `large` (16).
+
+### 13.4 Elevation — 6 levels (shadow-based)
+
+Levels 0–5 (dp 0 / 1 / 3 / 6 / 8 / 12). Use these exact box-shadows:
+
+```
+level0: none
+level1: 0 1px 2px 0 rgba(0,0,0,.30), 0 1px 3px 1px rgba(0,0,0,.15)
+level2: 0 1px 2px 0 rgba(0,0,0,.30), 0 2px 6px 2px rgba(0,0,0,.15)
+level3: 0 1px 3px 0 rgba(0,0,0,.30), 0 4px 8px 3px rgba(0,0,0,.15)
+level4: 0 2px 3px 0 rgba(0,0,0,.30), 0 6px 10px 4px rgba(0,0,0,.15)
+level5: 0 4px 4px 0 rgba(0,0,0,.30), 0 8px 12px 6px rgba(0,0,0,.15)
+```
+
+Typical: cards/raised surfaces = level1 (rest) → level2 or 3 on hover; menus =
+level2; dialogs = level3; FAB = level3 (→ level4 on hover); nav drawer = level1.
+
+### 13.5 Motion — easing + duration tokens (the heart of "animations")
+
+Easing (cubic-bezier), verified against M3:
+
+```
+standard              cubic-bezier(0.2, 0, 0, 1)
+standard-accelerate   cubic-bezier(0.3, 0, 1, 1)
+standard-decelerate   cubic-bezier(0, 0, 0, 1)
+emphasized            cubic-bezier(0.2, 0, 0, 1)      /* single-bezier fallback */
+emphasized-decelerate cubic-bezier(0.05, 0.7, 0.1, 1)
+emphasized-accelerate cubic-bezier(0.3, 0, 0.8, 0.15)
+```
+
+Durations:
+
+```
+short1 50   short2 100  short3 150  short4 200
+medium1 250 medium2 300 medium3 350 medium4 400
+long1 450   long2 500   long3 550   long4 600
+extra-long1 700 … extra-long4 1000  (ms)
+```
+
+Which to use:
+- Small state changes (hover/press/focus state layers, ripples, switches):
+  `short2`–`short4` with `standard`.
+- Enters (dialogs, menus, snackbars, expanding rows): `medium2`–`medium4` with
+  `emphasized-decelerate`. Exits: one step shorter with `emphasized-accelerate`.
+- Element position/size changes across the screen: `emphasized`.
+- Keep routine web UI snappy (150–300ms); avoid parallax and heavy blur; animate
+  `transform`/`opacity`, not layout properties.
+
+### 13.6 State layers & ripple
+
+Interactive elements get a **state layer**: an overlay of the element's "on"
+color at these opacities (M3): hover `0.08`, focus `0.10`, pressed `0.10`,
+dragged `0.16`. Implement as an `::before`/overlay tinted with the on-color and
+transitioned with `short` + `standard`. Add a **ripple** on press for buttons,
+list rows, icon buttons, chips, tabs — a small vanilla JS helper that spawns an
+expanding circle from the pointer position, colored with the on-color at ~12%,
+fading over `long1`. Focus states must remain visible with keyboard (`:focus-visible`).
+
+### 13.7 Components to build (map to existing screens)
+
+Style these as MD3, reusing token vars: top app bar (with title + actions);
+navigation rail or drawer for connection/table navigation; buttons — filled
+(primary actions), tonal (secondary), outlined, text; FAB or extended FAB for
+the primary "add" action (add connection / create table); cards for the
+connection list and the table list (surface-container, level1, medium radius);
+text fields — filled and/or outlined, with floating label, helper/error text,
+and the required focus/error state colors; dropdown menus and the type-select in
+the create-table form; chips for table-type / column-property tags; dialogs
+(extra-large radius, level3, scrim) for the destructive-action confirmations and
+the SQL preview; snackbar/toast for transient success/error; a Material-styled
+data table for the browse grid (dense rows, on-surface-variant headers, hover
+state layer on rows); switches/checkboxes for `bool` inputs. Icons: Material
+Symbols.
+
+### 13.8 Accessibility & polish (required, not optional)
+
+- Honor `@media (prefers-reduced-motion: reduce)`: disable/last-frame all
+  transitions, ripples, and entrance animations.
+- Respect `prefers-color-scheme` for the initial light/dark choice; also allow a
+  manual toggle that sets `data-theme` on `<html>`. (Persisting the choice
+  server-side is fine; do NOT use localStorage in a way that breaks without JS.)
+- Contrast comes for free if you pair each surface with its matching `on-` role;
+  never put `on-surface` text on a `primary` fill, etc.
+- Minimum 48x48px touch/click targets for interactive controls.
+- Keep the SQL console and result grid readable — this is a data tool first; MD3
+  styling must not reduce information density to the point of being annoying.
+
+Definition of done for this iteration: the app is visually coherent MD3 across
+all screens, light+dark, with tasteful entrance/state/ripple motion, and still
+passes everything in §12 (no dependency added, no build step, no regressions to
+the escaping/bigint/auth fixes).
+
+### 13.9 Polish pass — screen-by-screen finish checklist
+
+§13.1–13.8 define the system; this is the audit that turns "technically MD3"
+into "finished". Go screen by screen — login, connections dashboard, table list,
+browse grid, create-table form, row insert/edit, schema view, SQL console — and
+verify each item, in BOTH light and dark. After each area, self-critique: does it
+look finished, or like MD3 was bolted on? If the latter, keep going.
+
+**Consistency:** one spacing rhythm (4/8-based) everywhere; no one-off hex,
+radius, shadow, or duration — everything references §13 tokens; the same action
+has the same label and button style on every screen.
+
+**State coverage (every interactive element):** rest / hover (state layer) /
+`:focus-visible` / pressed (ripple) / disabled. Every data view has explicit
+loading, empty (an invitation to act, not a blank page), and error
+(error-container banner carrying the real Manticore message) states.
+
+**Data grid (the surface people stare at all day — get it right):**
+- Sticky header (`title-small`, `on-surface-variant`); dense but legible rows.
+- Right-align numeric columns; render `NULL`/empty as a muted distinct token,
+  never a blank cell.
+- Long text/JSON: truncate the cell and open the full value in a dialog or side
+  sheet; JSON pretty-printed, monospace. One value must never blow out the layout.
+- Column headers show the type (small chip). Horizontal overflow scrolls inside
+  the surface, not the whole page. Hovered/selected row uses a state layer.
+
+**Forms:** filled/outlined text fields with floating labels + helper/error text
+wired to real validation; the create-table column builder is a clean repeatable
+row (name + type select + property chips + remove); the generated SQL preview is
+a `surface-container` monospace block with a copy button, labeled so it is clear
+it will run. Correct filled / tonal / text button hierarchy.
+
+**Dialogs:** destructive confirmations and the SQL preview use a real MD3 dialog
+(scrim, extra-large radius, level3), focus-trapped, ESC/scrim to dismiss, with an
+error-colored confirm for destructive actions.
+
+**SQL console:** monospace, comfortable density; `Cmd/Ctrl+Enter` runs; results
+reuse the grid component; error/warning banners distinct; show row count +
+execution time. It is the power-user surface — keep it fast and legible.
+
+**Navigation:** top app bar + nav rail/drawer with clear active states; a
+breadcrumb (Connection ▸ Table ▸ Browse); the current connection always visible.
+
+**Motion:** entrances on dialogs/menus/snackbars (emphasized-decelerate,
+medium); state-layer + ripple on interaction (short); nothing gratuitous;
+`prefers-reduced-motion` fully honored.
+
+**Dark theme is not an afterthought:** verify every screen in dark. In MD3 dark,
+elevation reads through lighter `surface-container*` roles, not just shadow — use
+the container roles so raised surfaces are actually distinguishable.
+
+**Density guard:** MD3 defaults can be airy; this is a data tool. Keep tables and
+the console information-dense; use compact variants where MD3 allows.
+
+**Copy pass (words are design material):** active-voice, action-named buttons
+("Create table", "Save changes", "Delete", "Run"); the success toast echoes the
+verb ("Table created", "Row deleted"); errors say what happened and what to do;
+empty states invite ("No tables yet — create your first one").
+
+**Offline / LAN resilience:** the tool is self-hosted and may be opened from a
+machine with no internet. If Roboto / Material Symbols load from the Google CDN
+and the browser is offline, text falls back and — worse — Symbols icons render as
+raw ligature words. Self-host the font + icon files under `public/`, or ship a
+system-font fallback stack and a text fallback for critical icons, so the UI
+never degrades to broken glyphs on a LAN.
+
+**Restraint check (do this last):** remove one decorative thing that is not
+serving the tool. Spend boldness in one place; keep everything around it quiet.
+
+**Guardrails — this is polish, NOT a rewrite:**
+- Preserve every behavior and endpoint. Do NOT touch the `manticore.js` escaping
+  (F1) or 64-bit id (F2) logic, the auth/session code, or the data model. This is
+  markup + CSS + presentational client-JS work; view templates and `app.js` may
+  be refactored for presentation only if behavior stays identical.
+- No new dependencies, no build step (§2). Everything in §12 must still pass.
+- Work area-by-area; after each area, run the app against the test node and
+  confirm nothing regressed before moving on.
