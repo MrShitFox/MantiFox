@@ -44,7 +44,8 @@
         var id = button.getAttribute('data-test-connection');
         var output = document.querySelector('[data-test-output="' + cssEscape(id) + '"]');
         button.disabled = true;
-        setText(output, 'Testing...');
+        if (output) output.className = 'test-output muted';
+        setLoading(output, 'Testing…');
 
         try {
           var response = await fetch('/api/connections/' + encodeURIComponent(id) + '/test', {
@@ -56,7 +57,7 @@
             setText(output, messagesToText(data.messages) || data.error || 'Connection test failed');
             output.className = 'test-output error-text';
           } else {
-            setText(output, 'OK');
+            setText(output, '✓ Connected');
             output.className = 'test-output success-text';
           }
         } catch (error) {
@@ -81,7 +82,7 @@
       event.preventDefault();
       clearNode(results);
       results.classList.remove('empty');
-      results.textContent = 'Running...';
+      setLoading(results, 'Running…');
 
       try {
         var response = await fetch('/api/connections/' + encodeURIComponent(connectionId) + '/sql', {
@@ -119,15 +120,29 @@
         var index = Number.parseInt(countInput.value || '0', 10) || 0;
         list.insertAdjacentHTML('beforeend', createColumnRowHtml(index));
         countInput.value = String(index + 1);
-        bindColumnKindControls(list.lastElementChild);
+        var added = list.lastElementChild;
+        bindColumnKindControls(added);
         disableExecute(form);
+        if (added) {
+          added.classList.add('entering');
+          added.addEventListener('animationend', function () {
+            added.classList.remove('entering');
+          }, { once: true });
+          var nameInput = added.querySelector('input[name$="_name"]');
+          if (nameInput) nameInput.focus();
+        }
       });
 
       list.addEventListener('click', function (event) {
         var button = event.target.closest('[data-remove-column]');
         if (!button) return;
         var row = button.closest('[data-column-row]');
-        if (row) row.remove();
+        if (row) {
+          row.classList.add('removing');
+          row.addEventListener('animationend', function () {
+            row.remove();
+          }, { once: true });
+        }
         disableExecute(form);
       });
 
@@ -361,6 +376,15 @@
 
   function setText(node, text) {
     if (node) node.textContent = text;
+  }
+
+  function setLoading(node, label) {
+    if (!node) return;
+    clearNode(node);
+    var spinner = document.createElement('span');
+    spinner.className = 'spinner';
+    node.appendChild(spinner);
+    node.appendChild(document.createTextNode(label));
   }
 
   function clearNode(node) {

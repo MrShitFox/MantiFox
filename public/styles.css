@@ -12,11 +12,33 @@
   --warning: #ffd166;
   --success: #9ce37d;
   --shadow: 0 18px 60px rgba(0, 0, 0, 0.26);
+  --shadow-lift: 0 22px 48px -18px rgba(0, 0, 0, 0.55);
+  --glow-accent: 0 14px 30px -10px rgba(76, 201, 173, 0.5);
+  --glow-danger: 0 14px 30px -12px rgba(255, 122, 144, 0.42);
+  --ring: 0 0 0 3px rgba(141, 223, 203, 0.28);
+  --ease: cubic-bezier(0.4, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --speed: 160ms;
+  --speed-slow: 340ms;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
 }
 
 * {
   box-sizing: border-box;
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+::selection {
+  background: rgba(141, 223, 203, 0.28);
+  color: #fff;
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 body {
@@ -26,6 +48,19 @@ body {
     radial-gradient(circle at top left, rgba(141, 223, 203, 0.16), transparent 32rem),
     linear-gradient(135deg, #0d1118, #121521 52%, #0d1118);
   color: var(--text);
+}
+
+/* Slow-drifting aurora glow that keeps the backdrop feeling alive. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: -20vmax;
+  z-index: -1;
+  pointer-events: none;
+  background:
+    radial-gradient(28rem 28rem at 82% 8%, rgba(76, 201, 173, 0.1), transparent 60%),
+    radial-gradient(32rem 32rem at 12% 92%, rgba(141, 223, 203, 0.09), transparent 62%);
+  animation: aurora 26s var(--ease) infinite alternate;
 }
 
 a {
@@ -59,12 +94,30 @@ button,
   cursor: pointer;
   font-weight: 700;
   text-decoration: none;
+  transition:
+    transform var(--speed) var(--ease),
+    box-shadow var(--speed) var(--ease),
+    filter var(--speed) var(--ease),
+    background var(--speed) var(--ease),
+    border-color var(--speed) var(--ease),
+    color var(--speed) var(--ease),
+    opacity var(--speed) var(--ease);
 }
 
 button:hover,
 .button:hover {
   text-decoration: none;
-  filter: brightness(1.04);
+  filter: brightness(1.05);
+  transform: translateY(-1px);
+  box-shadow: var(--glow-accent);
+}
+
+button:active,
+.button:active {
+  transform: translateY(0) scale(0.98);
+  box-shadow: none;
+  filter: brightness(0.98);
+  transition-duration: 60ms;
 }
 
 button.secondary,
@@ -74,10 +127,34 @@ button.secondary,
   border-color: var(--border);
 }
 
+button.secondary:hover,
+.button.secondary:hover {
+  background: rgba(141, 223, 203, 0.08);
+  border-color: rgba(141, 223, 203, 0.45);
+  box-shadow: none;
+}
+
 button.danger {
   background: transparent;
   color: var(--danger);
   border-color: rgba(255, 122, 144, 0.38);
+}
+
+button.danger:hover,
+.button.danger:hover,
+.button.secondary.danger-link:hover,
+a.danger-link:hover {
+  background: rgba(255, 122, 144, 0.1);
+  border-color: rgba(255, 122, 144, 0.6);
+  color: var(--danger);
+  box-shadow: var(--glow-danger);
+}
+
+.link-button:hover {
+  transform: none;
+  box-shadow: none;
+  filter: none;
+  text-decoration: underline;
 }
 
 .danger-link {
@@ -100,11 +177,41 @@ textarea {
   padding: 0.7rem 0.8rem;
   background: #0e121a;
   color: var(--text);
+  transition:
+    border-color var(--speed) var(--ease),
+    box-shadow var(--speed) var(--ease),
+    background var(--speed) var(--ease);
+}
+
+input:hover,
+select:hover,
+textarea:hover {
+  border-color: rgba(141, 223, 203, 0.32);
+}
+
+input:focus,
+select:focus,
+textarea:focus {
+  outline: none;
+  border-color: var(--accent-strong);
+  box-shadow: var(--ring);
+  background: #0c1017;
+}
+
+input[type="checkbox"],
+input[type="radio"] {
+  accent-color: var(--accent-strong);
+  cursor: pointer;
 }
 
 textarea {
   resize: vertical;
   line-height: 1.45;
+}
+
+::placeholder {
+  color: var(--muted);
+  opacity: 0.7;
 }
 
 code {
@@ -127,10 +234,46 @@ code {
 }
 
 .brand {
-  color: var(--text);
   font-size: 1.2rem;
   font-weight: 850;
   letter-spacing: -0.03em;
+  background: linear-gradient(120deg, var(--accent), var(--accent-strong) 55%, var(--text));
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  transition: filter var(--speed) var(--ease), transform var(--speed) var(--ease);
+}
+
+.brand:hover {
+  filter: brightness(1.12) drop-shadow(0 0 14px rgba(141, 223, 203, 0.35));
+  text-decoration: none;
+}
+
+.nav a {
+  position: relative;
+  padding-bottom: 2px;
+}
+
+.nav a:not(.button)::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -2px;
+  height: 2px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent), var(--accent-strong));
+  transform: scaleX(0);
+  transform-origin: left;
+  transition: transform var(--speed) var(--ease);
+}
+
+.nav a:not(.button):hover {
+  text-decoration: none;
+}
+
+.nav a:not(.button):hover::after {
+  transform: scaleX(1);
 }
 
 .nav,
@@ -160,12 +303,18 @@ code {
   padding: 2rem 0 4rem;
 }
 
+/* Consistent vertical rhythm between the major stacked blocks — page
+   heading, grids, and each panel (Full-text search / Schema / Status)
+   — so sections breathe instead of crowding each other. */
+.container > * + * {
+  margin-top: 1.5rem;
+}
+
 .page-heading {
   display: flex;
   align-items: end;
   justify-content: space-between;
   gap: 1rem;
-  margin-bottom: 1rem;
 }
 
 h1,
@@ -496,6 +645,7 @@ tr:last-child td {
 }
 
 .schema-table {
+  margin-top: 1rem;
   margin-bottom: 1rem;
 }
 
@@ -536,5 +686,335 @@ tr:last-child td {
   .container {
     width: min(100% - 1rem, 1380px);
     padding-top: 1rem;
+  }
+}
+
+/* ======================================================================
+   Motion & polish
+   Entrance choreography, micro-interactions, and small refinements.
+   Everything here degrades gracefully and is disabled for users who
+   ask for reduced motion (see the bottom of this file).
+   ====================================================================== */
+
+@keyframes aurora {
+  from {
+    transform: translate3d(0, 0, 0) scale(1);
+    opacity: 0.85;
+  }
+  to {
+    transform: translate3d(0, 2.5%, 0) scale(1.08);
+    opacity: 1;
+  }
+}
+
+@keyframes rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes drop {
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes pop {
+  0% {
+    opacity: 0;
+    transform: translateY(10px) scale(0.98);
+  }
+  100% {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes col-enter {
+  from {
+    opacity: 0;
+    transform: translateY(-10px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes col-leave {
+  from {
+    opacity: 1;
+    transform: none;
+    max-height: 30rem;
+  }
+  to {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.97);
+    max-height: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    border-width: 0;
+  }
+}
+
+/* --- Entrance choreography ------------------------------------------- */
+
+.topbar {
+  animation: drop var(--speed-slow) var(--ease-out) both;
+}
+
+main.container > * {
+  animation: rise var(--speed-slow) var(--ease-out) both;
+}
+
+main.container > *:nth-child(1) { animation-delay: 0.05s; }
+main.container > *:nth-child(2) { animation-delay: 0.12s; }
+main.container > *:nth-child(3) { animation-delay: 0.19s; }
+main.container > *:nth-child(4) { animation-delay: 0.26s; }
+main.container > *:nth-child(5) { animation-delay: 0.33s; }
+main.container > *:nth-child(n + 6) { animation-delay: 0.4s; }
+
+.connection-card {
+  animation: pop var(--speed-slow) var(--ease-out) both;
+  transition:
+    transform var(--speed) var(--ease),
+    border-color var(--speed) var(--ease),
+    box-shadow var(--speed) var(--ease),
+    background var(--speed) var(--ease);
+}
+
+.connection-card:nth-child(1) { animation-delay: 0.12s; }
+.connection-card:nth-child(2) { animation-delay: 0.19s; }
+.connection-card:nth-child(3) { animation-delay: 0.26s; }
+.connection-card:nth-child(4) { animation-delay: 0.33s; }
+.connection-card:nth-child(n + 5) { animation-delay: 0.4s; }
+
+.result-set {
+  animation: rise var(--speed-slow) var(--ease-out) both;
+}
+
+a {
+  transition: color var(--speed) var(--ease);
+}
+
+/* --- Card & list micro-interactions --------------------------------- */
+
+.connection-card:hover {
+  transform: translateY(-3px);
+  border-color: rgba(141, 223, 203, 0.4);
+  background: rgba(255, 255, 255, 0.045);
+  box-shadow: var(--shadow-lift);
+}
+
+.table-list a {
+  position: relative;
+  transition:
+    background var(--speed) var(--ease),
+    transform var(--speed) var(--ease),
+    color var(--speed) var(--ease),
+    padding-left var(--speed) var(--ease);
+}
+
+.table-list a:hover {
+  transform: translateX(3px);
+}
+
+.table-list a.active {
+  padding-left: 1rem;
+}
+
+.table-list a.active::before {
+  content: "";
+  position: absolute;
+  left: 0.3rem;
+  top: 0.7rem;
+  bottom: 0.7rem;
+  width: 3px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+}
+
+/* --- Tables ---------------------------------------------------------- */
+
+tbody tr {
+  transition: background var(--speed) var(--ease);
+}
+
+tbody tr:hover {
+  background: rgba(141, 223, 203, 0.05);
+}
+
+th a {
+  color: var(--muted);
+  font-weight: 600;
+  transition: color var(--speed) var(--ease);
+}
+
+th a:hover {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.status-grid div {
+  transition: border-color var(--speed) var(--ease), background var(--speed) var(--ease);
+}
+
+.status-grid div:hover {
+  border-color: rgba(141, 223, 203, 0.3);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+/* --- Alerts ---------------------------------------------------------- */
+
+.alert {
+  border-left-width: 4px;
+  animation: drop var(--speed-slow) var(--ease-out) both;
+}
+
+/* --- Checkbox cards -------------------------------------------------- */
+
+.checkbox-card {
+  cursor: pointer;
+  transition:
+    border-color var(--speed) var(--ease),
+    background var(--speed) var(--ease),
+    box-shadow var(--speed) var(--ease);
+}
+
+.checkbox-card:hover {
+  border-color: rgba(141, 223, 203, 0.35);
+}
+
+.checkbox-card:has(input:checked) {
+  border-color: rgba(141, 223, 203, 0.5);
+  background: rgba(141, 223, 203, 0.08);
+}
+
+/* --- Details / summary ----------------------------------------------- */
+
+summary {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  cursor: pointer;
+  list-style: none;
+  font-weight: 600;
+  color: var(--text);
+  transition: color var(--speed) var(--ease);
+}
+
+summary::-webkit-details-marker {
+  display: none;
+}
+
+summary::before {
+  content: "\25B8";
+  color: var(--accent);
+  transition: transform var(--speed) var(--ease);
+}
+
+details[open] > summary::before {
+  transform: rotate(90deg);
+}
+
+summary:hover {
+  color: var(--accent);
+}
+
+details[open] > .form-grid,
+details[open] > label {
+  animation: rise var(--speed-slow) var(--ease-out) both;
+}
+
+/* --- Auth reveal & column builder rows ------------------------------- */
+
+.auth-basic:not([hidden]),
+.auth-bearer:not([hidden]) {
+  animation: rise var(--speed) var(--ease-out) both;
+}
+
+.column-row.entering {
+  animation: col-enter var(--speed-slow) var(--ease-out) both;
+}
+
+.column-row.removing {
+  overflow: hidden;
+  pointer-events: none;
+  animation: col-leave 0.26s var(--ease) both;
+}
+
+/* --- Loading spinner (used by app.js for async actions) ------------- */
+
+.spinner {
+  display: inline-block;
+  width: 0.95em;
+  height: 0.95em;
+  margin-right: 0.45em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -0.15em;
+  animation: spin 0.62s linear infinite;
+}
+
+.test-output:not(:empty) {
+  animation: drop var(--speed) var(--ease-out) both;
+}
+
+/* --- Scrollbars ------------------------------------------------------ */
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+
+::-webkit-scrollbar {
+  width: 11px;
+  height: 11px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: var(--border);
+  border: 3px solid transparent;
+  border-radius: 10px;
+  background-clip: padding-box;
+  transition: background var(--speed) var(--ease);
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: var(--panel-2);
+  background-clip: padding-box;
+}
+
+/* --- Respect reduced-motion preferences ------------------------------ */
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
   }
 }
