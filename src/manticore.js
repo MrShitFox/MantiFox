@@ -93,6 +93,27 @@ function authorizationHeader(connection) {
   return null;
 }
 
+// Manticore error/warning fields are usually strings, but several builds return
+// an object (e.g. `{ type, reason, index }`) for the JSON HTTP endpoints
+// (/insert, /replace). Coercing those with a template literal yields the
+// useless "[object Object]" and hides the real cause, so render a readable line.
+export function manticoreErrorText(value) {
+  if (value == null) return '';
+  if (typeof value === 'string') return value;
+  if (typeof value === 'object') {
+    const reason = value.reason || value.error || value.message || value.type;
+    if (reason && typeof reason === 'string') {
+      return value.index ? `${reason} (index: ${value.index})` : reason;
+    }
+    try {
+      return JSON.stringify(value);
+    } catch {
+      return String(value);
+    }
+  }
+  return String(value);
+}
+
 export async function manticoreRequest(connection, endpoint, options = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), options.timeoutMs || config.manticoreTimeoutMs);
@@ -124,14 +145,28 @@ export async function manticoreRequest(connection, endpoint, options = {}) {
     }
 
     if (!response.ok) {
-      const detail = payload?.error || payload?.message || text || response.statusText;
+      const detail = manticoreErrorText(payload?.error) || manticoreErrorText(payload?.message)
+        || text || response.statusText;
       throw new Error(`Manticore HTTP ${response.status}: ${detail}`);
     }
 
     return payload;
   } catch (error) {
     if (error.name === 'AbortError') {
-      throw new Error(`Manticore request timed out after ${options.timeoutMs || config.manticoreTimeoutMs}ms`);
+      throw Object.assign(
+        new Error(`Manticore request timed out after ${options.timeoutMs || config.manticoreTimeoutMs}ms`),
+        { statusCode: 504 }
+      );
+    }
+    // fetch() rejects with a TypeError on transport failures (connection
+    // refused, DNS, TLS). The raw message is just "fetch failed"; surface which
+    // endpoint failed and the OS-level cause so the error is actionable.
+    if (error instanceof TypeError) {
+      const cause = error.cause?.code || error.cause?.message || error.message;
+      throw Object.assign(
+        new Error(`Could not reach Manticore at ${connectionBaseUrl(connection)}: ${cause}`),
+        { statusCode: 502 }
+      );
     }
     throw error;
   } finally {
@@ -705,16 +740,16 @@ export async function replaceDocument(connection, table, rowId, fields, values) 
 export function collectJsonMessages(payload) {
   const messages = [];
   if (!payload || typeof payload !== 'object') return messages;
-  if (payload.error) messages.push({ type: 'error', message: String(payload.error) });
-  if (payload.warning) messages.push({ type: 'warning', message: String(payload.warning) });
+  if (payload.error) messages.push({ type: 'error', message: manticoreErrorText(payload.error) });
+  if (payload.warning) messages.push({ type: 'warning', message: manticoreErrorText(payload.warning) });
   if (payload.errors) {
-    messages.push({ type: 'error', message: typeof payload.errors === 'string' ? payload.errors : 'Manticore reported JSON endpoint errors' });
+    messages.push({ type: 'error', message: manticoreErrorText(payload.errors) || 'Manticore reported JSON endpoint errors' });
   }
   if (Array.isArray(payload.items)) {
     payload.items.forEach((item, index) => {
       const action = item && typeof item === 'object' ? Object.values(item)[0] : null;
-      if (action?.error) messages.push({ type: 'error', statement: index + 1, message: String(action.error) });
-      if (action?.warning) messages.push({ type: 'warning', statement: index + 1, message: String(action.warning) });
+      if (action?.error) messages.push({ type: 'error', statement: index + 1, message: manticoreErrorText(action.error) });
+      if (action?.warning) messages.push({ type: 'warning', statement: index + 1, message: manticoreErrorText(action.warning) });
     });
   }
   return messages;

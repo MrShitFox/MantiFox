@@ -119,19 +119,26 @@ function normalizeAuth(input, existing) {
 }
 
 function normalizeConnectionInput(input, existing = null) {
-  const parsed = parseConnectionHost(
-    input.host ?? existing?.host,
-    input.scheme ?? existing?.scheme,
-    input.port ?? existing?.port
-  );
-  const auth = normalizeAuth(input, existing);
-  const name = String(input.name || existing?.name || `${parsed.host}:${parsed.port}`).trim();
+  try {
+    const parsed = parseConnectionHost(
+      input.host ?? existing?.host,
+      input.scheme ?? existing?.scheme,
+      input.port ?? existing?.port
+    );
+    const auth = normalizeAuth(input, existing);
+    const name = String(input.name || existing?.name || `${parsed.host}:${parsed.port}`).trim();
 
-  if (!name) {
-    throw new Error('Name is required');
+    if (!name) {
+      throw new Error('Name is required');
+    }
+
+    return { name, ...parsed, ...auth };
+  } catch (error) {
+    // These are all client-input validation failures; make sure the JSON API
+    // reports them as 400, not 500. (The HTML form path already renders 400.)
+    if (!error.statusCode) error.statusCode = 400;
+    throw error;
   }
-
-  return { name, ...parsed, ...auth };
 }
 
 function mapConnection(row) {
