@@ -593,6 +593,27 @@ operators. Keep these two modes distinct in the UI and in the code path.
   In JSON, `"profile":true` adds a `profile` node.
 - `EXPLAIN QUERY <t> '<query>'` (or `SET profiling=1` then `SHOW PLAN`) returns
   the transformed query tree — good for an "how was this parsed" panel.
+  - If this panel loads lazily (htmx `load`/`revealed`/`intersect`), the trigger
+    MUST be (re)processed after the results fragment is swapped in — call
+    `htmx.process()` on the new content, or bind via a swap-surviving path.
+    A lazy panel stuck on "Loading" with no network request is the classic
+    "not re-initialised after swap" bug (§7); verify the `/explain` request
+    actually fires.
+
+**Developer "reproduce this query" panel (dev affordance — expose it):**
+Show the EXACT request the tool sent for the current search, so a developer can
+copy it and get an identical result — "paste this and you'll get the same". This
+turns the search screen into a playground.
+- Show what was actually sent: if the tool built SQL, show the full
+  `SELECT … WHERE MATCH('…') OPTION … FACET … LIMIT …` (already escaped, runnable
+  verbatim); if it sent JSON `/search`, show the request body. Ideally show the
+  real request as a copy-paste `curl` too (method, path, body), plus the
+  equivalent SQL for the SQL console.
+- A **copy** button and an **"Open in SQL console"** action that prefills the
+  console with the statement. Keep it in sync with the live query state (mode,
+  fields, ranker, field_weights, fuzzy, filters, facets, pagination) — it must
+  reflect exactly what produced the visible results, not a stale/idealised form.
+- This is display of the tool's own outbound query; still escape it for HTML.
 
 **Fuzzy search & autocomplete (advanced — ALL require Manticore Buddy; feature-
 detect and hide when unavailable):**
