@@ -17,6 +17,12 @@ admin opens it in a browser and can:
 - Create and drop tables through a GUI form (not only via the SQL console);
   optionally add/drop columns and truncate.
 - Read data with pagination, sorting, and full-text search, shown in HTML tables.
+- **Search UI (first-class):** a proper full-text search experience per table —
+  plain-text and advanced/operator modes, field selection, ranker choice,
+  highlighted results with relevance, facets, query insight (`SHOW META`), and
+  fuzzy/autocomplete where the server supports it. See §4.7. This is the feature
+  that makes the tool *for Manticore*, not a generic table editor — treat search
+  as a headline experience, not a filter box.
 - Insert / edit / delete individual rows through convenient forms.
 - Run arbitrary SQL in a console (like the phpMyAdmin SQL tab).
 
@@ -507,6 +513,113 @@ switching to `"..."`. Confirmed against the manual and the live node
   encoder escapes for you). Reserve raw SQL-string building for cases that truly
   need it.
 
+### 4.7 Full-text search — reference (VERIFIED against the current manual)
+
+This section powers the Search UI. Full-text search is Manticore's core; get the
+syntax exactly right. Two ways to run a search:
+
+- **SQL** via `/sql?mode=raw`:
+  `SELECT id, weight() AS w, HIGHLIGHT() FROM <t> WHERE MATCH('<query>') OPTION ranker=proximity_bm25, field_weights=(title=10, body=1) FACET <attr> LIMIT 0,20`
+- **JSON** via `POST /search` (recommended when building the query
+  programmatically from form inputs — no SQL-string escaping):
+  `{ "table":"<t>", "query":{ "query_string":"<query>" }, "options":{...}, "highlight":{}, "limit":20, "offset":0 }`
+
+Only tables that have at least one full-text (`text`) field support `MATCH`.
+Attributes (int/string/json/…) are NOT full-text searchable — matching against an
+attribute is an error. A table with no `text` field can only be filtered/scanned
+(WHERE on attributes), not `MATCH`ed. Gate the search UI on the presence of a
+`text` field (from `DESC`).
+
+**Extended MATCH query operators (the query string inside `MATCH('…')`):**
+- Implicit **AND** — enumerated words all must match: `find me fast`.
+- **OR** — `|`: `fast | slow`. OR binds tighter than AND: `find me fast|slow`
+  = `find me (fast|slow)`.
+- **NOT** — `-` or `!`: `find me -fast`. A pure-negative query (`-fast` alone) is
+  not allowed by default; there must be at least one positive term.
+- **Phrase** — double quotes: `"find me fast"`.
+- **Proximity phrase** — `"hello world"~N` (terms within N positions).
+- **Quorum** — `"the world is wonderful"/3` (match ≥3 of the words) or a fraction
+  `/0.5` (≥50%).
+- **Field limit** — `@title hello`, multi `@(title,body) hello`, all-but
+  `@!title hello`, first-N-words `@title[50] hello`. `@@relaxed @(a,b) x`
+  tolerates fields missing on some tables.
+- **Proximity** — `hello NEAR/3 world`; inverse `NOTNEAR/N`.
+- **Sentence / paragraph / zone** — `SENTENCE`, `PARAGRAPH`, `ZONE:h1`,
+  `ZONESPAN:h1` (need `index_sp` / `html_strip` / `index_zones`).
+- **Wildcards** — `test*`, `*test*`, `*test` (need `min_infix_len` /
+  `min_prefix_len`); `?` = one char, `%` = zero-or-one (with `dict=keywords`).
+- **Exact form** — `=running` (needs `index_exact_words`) disables stemming for
+  that term.
+- **Boost** — `boston^2 city`. **MAYBE** — `cat MAYBE dog` (optional, ranks up).
+- **Grouping** — `( … )`.
+
+Escaping ties into §4.6: in **plain-text search mode** escape BOTH the SQL
+string literal (`\`→`\\`, `'`→`\'`) AND the operator characters above, so the
+user's text is matched literally. In **advanced/raw mode** the user is typing
+operators on purpose — escape only the SQL string-literal layer, never the
+operators. Keep these two modes distinct in the UI and in the code path.
+
+**Relevance & ranking:**
+- `weight()` (SQL) / `_score` (JSON) is the relevance score. Scores are only
+  comparable within one query, never across queries — don't present them as an
+  absolute quality metric.
+- Built-in rankers (`OPTION ranker=<name>` / JSON `"options":{"ranker":"<name>"}`):
+  **`proximity_bm25`** (default), `bm25`, `none`, `wordcount`, `proximity`,
+  `matchany`, `fieldmask`, `sph04`, `expr('<formula>')` (custom), `export`.
+  Names are case-insensitive; no `SPH_RANK_` prefix in SQL/JSON.
+- Per-field boosts: `OPTION field_weights=(title=10, body=1)` /
+  `"options":{"field_weights":{"title":10,"body":1}}`.
+
+**Highlighting:**
+- SQL: bare `HIGHLIGHT()` highlights all full-text fields for the current MATCH;
+  `HIGHLIGHT({before_match='<b>',after_match='</b>',limit=256,around=3}, 'title')`
+  for options/field; `SNIPPET(<field-or-text>, QUERY(), …)` is the lower-level
+  form (`QUERY()` returns the current MATCH text).
+- JSON: add a `"highlight": { ...options... }` node to the `/search` body; each
+  hit gets a `highlight` object. Render highlighted HTML but still escape any
+  non-highlight text (the highlight tags are the only allowed markup).
+
+**Faceting (great for the search UI's filters):**
+- SQL: `SELECT … FROM <t> WHERE MATCH('…') FACET <attr> [ORDER BY … LIMIT …]`;
+  multiple `FACET` clauses allowed. The response is multiple result sets — the
+  main hits, then one per facet.
+- JSON: `"aggs"` in the `/search` body.
+- Note: FACET is NOT allowed in multi-queries — but we send one statement per
+  request anyway (§4.1), so a single `MATCH … FACET` is fine.
+
+**Query insight (a killer feature — expose it):**
+- `SHOW META` run immediately after the search (SQL) returns `total`,
+  `total_found`, `time`, and per-keyword `keyword[i]` / `docs[i]` / `hits[i]`.
+  In JSON, `"profile":true` adds a `profile` node.
+- `EXPLAIN QUERY <t> '<query>'` (or `SET profiling=1` then `SHOW PLAN`) returns
+  the transformed query tree — good for an "how was this parsed" panel.
+
+**Fuzzy search & autocomplete (advanced — ALL require Manticore Buddy; feature-
+detect and hide when unavailable):**
+- Fuzzy: SQL `SELECT … WHERE MATCH('hello wrld') OPTION fuzzy=1 [, distance=N]
+  [, preserve={0|1}] [, layouts='us,ru,…']`; JSON `"options":{"fuzzy":true,
+  "distance":2,"preserve":1,"layouts":["us","ru"]}`. Constraints: requires Buddy;
+  not available for multi-queries; in SQL the MATCH string must contain only the
+  words (no operators except phrase). `preserve=1` keeps exact matches too;
+  `layouts` catches wrong-keyboard-layout typos.
+- Autocomplete: `CALL AUTOCOMPLETE('<prefix>', '<table>' [, 'us' AS layouts,
+  <N> AS fuzziness, <N> AS expansion_len, …])` or `POST /autocomplete`. Requires
+  Buddy AND the table to have `min_infix_len` set.
+- Spelling suggestions: `CALL SUGGEST('<word>', '<table>')` and `CALL
+  QSUGGEST('<words>', '<table>')` (QSUGGEST works on the last word — good for
+  as-you-type). Return suggestions with Levenshtein distance + doc counts.
+  Require `min_infix_len` + `dict='keywords'` on the table.
+- `CALL KEYWORDS('<query>', '<table>' [, opts])` tokenizes a query and returns
+  per-keyword `docs`/`hits` stats — useful for a "what will actually be searched"
+  hint.
+- Because these depend on Buddy / table settings, detect availability once per
+  connection (a probe call, caught on error) and only surface the controls that
+  work; never show a button that will error.
+
+**Result window:** the default result window is 1000 (§4.2). Paginating a search
+past offset+limit = 1000 errors unless you raise `OPTION max_matches`; keep the
+same clamp/logic used for browsing.
+
 ---
 
 ## 5. Development / test node
@@ -797,6 +910,13 @@ like this actually breaks.
   relevant, rather than silently destroying content.
 - Common tasks (create table, add/drop column, drop/truncate, full row CRUD) are
   reachable from the GUI without opening the SQL console.
+- **Search (§4.7):** plain-text mode escapes BOTH the SQL literal and the
+  full-text operators (user text matched literally); advanced mode escapes only
+  the SQL literal and passes operators through. The search UI is offered only on
+  tables that have a `text` field. Highlighted result HTML is safe (only the
+  highlight tags are markup; all other text escaped). Buddy-gated controls
+  (fuzzy, autocomplete, suggest) are hidden when the server lacks Buddy, never
+  shown broken. Deep search pagination past 1000 respects `OPTION max_matches`.
 
 Report findings as a short list of `{file, issue, severity, fix}`; fix the
 high/critical items in the same session and list the rest.
