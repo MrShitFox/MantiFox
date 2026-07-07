@@ -1,10 +1,9 @@
 import { escapeAttr, escapeHtml } from '../html.js';
 import { connectionBaseUrl } from '../manticore.js';
-import { renderAlert } from './components.js';
-import { layout } from './layout.js';
+import { button, emptyState, field, renderAlert, selectInput, textInput } from './components.js';
 
-export function renderDashboardPage({ connections = [], error = '' } = {}) {
-  return layout({
+export function renderDashboardPage({ connections = [], error = '', values = {} } = {}) {
+  return {
     title: 'Connections',
     body: `<section class="page-heading">
       <div>
@@ -16,18 +15,18 @@ export function renderDashboardPage({ connections = [], error = '' } = {}) {
     <div class="dashboard-grid">
       <section class="panel">
         <h2>Add connection</h2>
-        ${renderConnectionForm({ action: '/connections', submitLabel: 'Save connection' })}
+        ${renderConnectionForm({ connection: values, action: '/connections', submitLabel: 'Save connection' })}
       </section>
       <section class="panel">
         <h2>Saved connections</h2>
-        ${connections.length ? `<div class="connection-list">${connections.map(renderConnectionCard).join('')}</div>` : '<p class="empty">No connections yet.</p>'}
+        ${connections.length ? `<div class="connection-list">${connections.map(renderConnectionCard).join('')}</div>` : emptyState('No connections yet.')}
       </section>
     </div>`
-  });
+  };
 }
 
 export function renderEditConnectionPage({ connection, error = '' }) {
-  return layout({
+  return {
     title: `Edit ${connection.name}`,
     body: `<section class="panel narrow">
       <h1>Edit connection</h1>
@@ -38,7 +37,7 @@ export function renderEditConnectionPage({ connection, error = '' }) {
         error
       })}
     </section>`
-  });
+  };
 }
 
 function renderConnectionCard(connection) {
@@ -49,73 +48,85 @@ function renderConnectionCard(connection) {
     </header>
     <p>Auth: ${escapeHtml(connection.auth_type)}</p>
     <div class="button-row">
-      <a class="button" href="/connections/${connection.id}">Browse</a>
-      <a class="button secondary" href="/connections/${connection.id}/console">SQL</a>
-      <a class="button secondary" href="/connections/${connection.id}/edit">Edit</a>
-      <button type="button" class="secondary" data-test-connection="${connection.id}">Test</button>
-      <form method="post" action="/connections/${connection.id}/delete" data-confirm="Delete this connection?">
-        <button type="submit" class="danger">Delete</button>
+      ${button({ label: 'Browse', href: `/connections/${connection.id}` })}
+      ${button({ label: 'SQL', href: `/connections/${connection.id}/console`, variant: 'secondary' })}
+      ${button({ label: 'Edit', href: `/connections/${connection.id}/edit`, variant: 'secondary' })}
+      ${button({
+        label: 'Test',
+        variant: 'secondary',
+        attrs: {
+          'hx-post': `/connections/${connection.id}/test`,
+          'hx-target': `#test-output-${connection.id}`,
+          'hx-swap': 'outerHTML',
+          'hx-disabled-elt': 'this'
+        }
+      })}
+      <form method="post" action="/connections/${connection.id}/delete" data-confirm="Delete this connection?" hx-sync="this:drop">
+        ${button({ label: 'Delete', submit: true, variant: 'danger' })}
       </form>
     </div>
-    <p class="test-output" data-test-output="${connection.id}"></p>
+    <p class="test-output" id="test-output-${connection.id}"></p>
   </article>`;
 }
 
 function renderConnectionForm({ connection = {}, action, submitLabel, error = '' }) {
   const authType = connection.auth_type || 'none';
-  return `<form method="post" action="${escapeAttr(action)}" class="stacked-form connection-form">
+  return `<form method="post" action="${escapeAttr(action)}" class="stacked-form connection-form" hx-sync="this:drop">
     ${renderAlert(error)}
     <div class="two-cols">
-      <label>
-        <span>Name</span>
-        <input name="name" value="${escapeAttr(connection.name || '')}" placeholder="Production search" required>
-      </label>
-      <label>
-        <span>Scheme</span>
-        <select name="scheme">
-          <option value="http" ${connection.scheme === 'https' ? '' : 'selected'}>http</option>
-          <option value="https" ${connection.scheme === 'https' ? 'selected' : ''}>https</option>
-        </select>
-      </label>
+      ${field({
+        label: 'Name',
+        control: textInput({ name: 'name', value: connection.name || '', attrs: { placeholder: 'Production search', required: true } })
+      })}
+      ${field({
+        label: 'Scheme',
+        control: selectInput({ name: 'scheme', value: connection.scheme === 'https' ? 'https' : 'http', options: ['http', 'https'] })
+      })}
     </div>
     <div class="two-cols">
-      <label>
-        <span>Host</span>
-        <input name="host" value="${escapeAttr(connection.host || '')}" placeholder="192.168.1.75" required>
-      </label>
-      <label>
-        <span>HTTP port</span>
-        <input name="port" inputmode="numeric" value="${escapeAttr(connection.port || '')}" placeholder="9318" required>
-      </label>
+      ${field({
+        label: 'Host',
+        control: textInput({ name: 'host', value: connection.host || '', attrs: { placeholder: '192.168.1.75', required: true } })
+      })}
+      ${field({
+        label: 'HTTP port',
+        control: textInput({ name: 'port', value: connection.port || '', attrs: { inputmode: 'numeric', placeholder: '9318', required: true } })
+      })}
     </div>
-    <label>
-      <span>Authentication</span>
-      <select name="auth_type">
-        <option value="none" ${authType === 'none' ? 'selected' : ''}>None</option>
-        <option value="basic" ${authType === 'basic' ? 'selected' : ''}>Basic</option>
-        <option value="bearer" ${authType === 'bearer' ? 'selected' : ''}>Bearer token</option>
-      </select>
-    </label>
+    ${field({
+      label: 'Authentication',
+      control: selectInput({
+        name: 'auth_type',
+        value: authType,
+        options: [
+          { value: 'none', label: 'None' },
+          { value: 'basic', label: 'Basic' },
+          { value: 'bearer', label: 'Bearer token' }
+        ]
+      })
+    })}
     <div class="auth-basic">
       <div class="two-cols">
-        <label>
-          <span>Username</span>
-          <input name="username" value="${escapeAttr(connection.username || '')}">
-        </label>
-        <label>
-          <span>Password ${connection.id ? '<small>leave blank to keep</small>' : ''}</span>
-          <input type="password" name="password" autocomplete="new-password">
-        </label>
+        ${field({
+          label: 'Username',
+          control: textInput({ name: 'username', value: connection.username || '' })
+        })}
+        ${field({
+          label: 'Password',
+          hint: connection.id ? 'leave blank to keep' : '',
+          control: textInput({ name: 'password', type: 'password', attrs: { autocomplete: 'new-password' } })
+        })}
       </div>
     </div>
     <div class="auth-bearer">
-      <label>
-        <span>Bearer token ${connection.id ? '<small>leave blank to keep</small>' : ''}</span>
-        <input type="password" name="bearer_token" autocomplete="off">
-      </label>
+      ${field({
+        label: 'Bearer token',
+        hint: connection.id ? 'leave blank to keep' : '',
+        control: textInput({ name: 'bearer_token', type: 'password', attrs: { autocomplete: 'off' } })
+      })}
     </div>
     <div class="form-actions">
-      <button type="submit">${escapeHtml(submitLabel)}</button>
+      ${button({ label: submitLabel, submit: true })}
     </div>
   </form>`;
 }

@@ -5,8 +5,10 @@ Self-hosted web admin GUI for Manticore Search: saved HTTP connections, table br
 ## Requirements
 
 - Node.js 20 or newer.
-- Manticore Search HTTP API endpoint, for example `http://192.168.1.75:9318`.
-- No build step. Runtime dependency: `better-sqlite3` only.
+- Manticore Search HTTP API endpoint, for example `http://127.0.0.1:9308`.
+- No build step. Runtime dependency: `better-sqlite3` only. The frontend uses
+  htmx (vendored at `public/htmx.min.js`, pinned 2.0.10 — no CDN, works
+  offline) for no-reload navigation, plus one vanilla `public/app.js`.
 
 ## Install
 

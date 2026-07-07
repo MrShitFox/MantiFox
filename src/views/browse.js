@@ -1,17 +1,27 @@
-import { columnNames, escapeAttr, escapeHtml, urlWithParams, valueToText } from '../html.js';
+import { columnNames, escapeAttr, escapeHtml, urlWithParams } from '../html.js';
 import {
+  button,
+  checkboxCard,
+  codeCell,
+  dataTable,
+  emptyState,
+  field,
   renderAlert,
   renderMessages,
+  renderPagination,
   renderRowForm,
-  renderStatusTable
+  renderStatusTable,
+  selectInput,
+  sqlPreviewBlock,
+  textInput,
+  textareaInput
 } from './components.js';
-import { layout } from './layout.js';
 
 const createColumnTypes = ['text', 'string', 'int', 'integer', 'bigint', 'float', 'bool', 'json', 'timestamp', 'multi', 'multi64', 'float_vector'];
 const alterColumnTypes = ['text', 'string', 'int', 'integer', 'bigint', 'float', 'bool', 'json', 'timestamp', 'multi', 'multi64'];
 
 export function renderConnectionPage({ connection, tables = [], messages = [], error = '' }) {
-  return layout({
+  return {
     title: `${connection.name} tables`,
     body: `<section class="page-heading">
       <div>
@@ -19,8 +29,8 @@ export function renderConnectionPage({ connection, tables = [], messages = [], e
         <p>Tables exposed by <code>${escapeHtml(connection.host)}:${escapeHtml(connection.port)}</code>.</p>
       </div>
       <div class="button-row">
-        <a class="button" href="/connections/${connection.id}/new-table">Create table</a>
-        <a class="button secondary" href="/connections/${connection.id}/console">Open SQL console</a>
+        ${button({ label: 'Create table', href: `/connections/${connection.id}/new-table` })}
+        ${button({ label: 'Open SQL console', href: `/connections/${connection.id}/console`, variant: 'secondary' })}
       </div>
     </section>
     ${renderAlert(error)}
@@ -29,7 +39,7 @@ export function renderConnectionPage({ connection, tables = [], messages = [], e
       <h2>Tables</h2>
       ${renderTableList(connection, tables)}
     </section>`
-  });
+  };
 }
 
 export function renderBrowsePage({
@@ -50,15 +60,11 @@ export function renderBrowsePage({
   messages = [],
   error = ''
 }) {
-  const offset = (page - 1) * perPage;
-  const maxPage = Math.max(1, Math.ceil(total / perPage));
-  const rows = rowsResult?.data || [];
-  const columns = columnNames(rowsResult);
   const basePath = `/connections/${connection.id}/tables/${encodeURIComponent(table)}`;
   const tableType = tableMeta?.type || '';
   const canWrite = tableType === 'rt';
 
-  return layout({
+  return {
     title: `${table} - ${connection.name}`,
     body: `<section class="page-heading">
       <div>
@@ -66,10 +72,12 @@ export function renderBrowsePage({
         <h1>${escapeHtml(table)}</h1>
       </div>
       <div class="button-row">
-        ${canWrite ? `<a class="button" href="${basePath}/new">Insert row</a>` : `<span class="button disabled" title="Row writes require an rt table">Insert row</span>`}
-        ${canWrite ? `<a class="button secondary" href="${basePath}/truncate">Truncate</a>` : ''}
-        ${canWrite ? `<a class="button secondary danger-link" href="${basePath}/drop">Drop table</a>` : ''}
-        <a class="button secondary" href="/connections/${connection.id}/console">SQL console</a>
+        ${canWrite
+          ? button({ label: 'Insert row', href: `${basePath}/new` })
+          : button({ label: 'Insert row', href: `${basePath}/new`, disabled: true, title: 'Row writes require an rt table' })}
+        ${canWrite ? button({ label: 'Truncate', href: `${basePath}/truncate`, variant: 'secondary' }) : ''}
+        ${canWrite ? button({ label: 'Drop table', href: `${basePath}/drop`, variant: 'secondary danger-link' }) : ''}
+        ${button({ label: 'SQL console', href: `/connections/${connection.id}/console`, variant: 'secondary' })}
       </div>
     </section>
     ${renderAlert(error)}
@@ -80,27 +88,7 @@ export function renderBrowsePage({
         <h2>Tables</h2>
         ${renderTableList(connection, tables, table)}
       </aside>
-      <section class="panel data-panel">
-        <form method="get" action="${escapeAttr(basePath)}" class="toolbar">
-          <label>
-            <span>Full-text search</span>
-            <input name="q" value="${escapeAttr(search)}" placeholder="MATCH query">
-          </label>
-          <label>
-            <span>Rows</span>
-            <select name="perPage">
-              ${[10, 25, 50, 100].map((value) => `<option value="${value}" ${value === perPage ? 'selected' : ''}>${value}</option>`).join('')}
-            </select>
-          </label>
-          ${sort ? `<input type="hidden" name="sort" value="${escapeAttr(sort)}">` : ''}
-          ${dir ? `<input type="hidden" name="dir" value="${escapeAttr(dir)}">` : ''}
-          <button type="submit">Apply</button>
-          ${search ? `<a href="${basePath}" class="button secondary">Clear</a>` : ''}
-        </form>
-        <p class="muted">Showing ${escapeHtml(offset + (rows.length ? 1 : 0))}-${escapeHtml(offset + rows.length)} of ${escapeHtml(total)} rows.</p>
-        ${renderDataGrid({ connection, table, columns, rows, page, perPage, search, sort, dir, canWrite })}
-        ${renderPagination({ basePath, page, maxPage, perPage, search, sort, dir })}
-      </section>
+      ${renderBrowseDataPanel({ connection, table, rowsResult, total, page, perPage, search, sort, dir, canWrite })}
     </div>
     <section class="panel">
       <h2>Schema</h2>
@@ -109,37 +97,71 @@ export function renderBrowsePage({
     </section>
     <section class="panel">
       <h2>Status</h2>
-      ${renderStatusTable(statusResult?.[0]) || '<p class="empty">No status data.</p>'}
+      ${renderStatusTable(statusResult?.[0]) || emptyState('No status data.')}
     </section>`
-  });
+  };
+}
+
+// The self-contained grid panel (search toolbar + rows + pagination). Search,
+// sort, per-page and pagination requests swap ONLY this section (hx-target
+// "#data-panel", outerHTML) so the sidebar/schema/status keep their state and
+// scroll; hx-push-url keeps the URL shareable.
+export function renderBrowseDataPanel({
+  connection,
+  table,
+  rowsResult,
+  total = 0,
+  page = 1,
+  perPage = 25,
+  search = '',
+  sort = '',
+  dir = 'asc',
+  canWrite = false
+}) {
+  const offset = (page - 1) * perPage;
+  const maxPage = Math.max(1, Math.ceil(total / perPage));
+  const rows = rowsResult?.data || [];
+  const columns = columnNames(rowsResult);
+  const basePath = `/connections/${connection.id}/tables/${encodeURIComponent(table)}`;
+
+  return `<section class="panel data-panel" id="data-panel">
+    <form method="get" action="${escapeAttr(basePath)}" class="toolbar" hx-get="${escapeAttr(basePath)}" hx-target="#data-panel" hx-swap="outerHTML" hx-push-url="true" hx-sync="this:drop">
+      ${field({ label: 'Full-text search', control: textInput({ name: 'q', value: search, attrs: { placeholder: 'MATCH query' } }) })}
+      ${field({ label: 'Rows', control: selectInput({ name: 'perPage', value: perPage, options: [10, 25, 50, 100] }) })}
+      ${sort ? `<input type="hidden" name="sort" value="${escapeAttr(sort)}">` : ''}
+      ${dir ? `<input type="hidden" name="dir" value="${escapeAttr(dir)}">` : ''}
+      ${button({ label: 'Apply', submit: true })}
+      ${search ? button({ label: 'Clear', href: basePath, variant: 'secondary', attrs: dataPanelLinkAttrs(basePath) }) : ''}
+    </form>
+    <p class="muted">Showing ${escapeHtml(offset + (rows.length ? 1 : 0))}-${escapeHtml(offset + rows.length)} of ${escapeHtml(total)} rows.</p>
+    ${renderDataGrid({ connection, table, columns, rows, page, perPage, search, sort, dir, canWrite })}
+    ${renderPagination({ basePath, page, maxPage, perPage, search, sort, dir })}
+  </section>`;
 }
 
 export function renderCreateTablePage({ connection, values = {}, previewSql = '', showExecute = false, error = '' }) {
   const columns = createColumnsFromValues(values);
   const count = columns.length;
 
-  return layout({
+  return {
     title: `Create table - ${connection.name}`,
     body: `<section class="panel schema-builder">
       <p><a href="/connections/${connection.id}">Back to ${escapeHtml(connection.name)}</a></p>
       <h1>Create table</h1>
       ${renderAlert(error)}
-      <form method="post" action="/connections/${connection.id}/new-table" class="stacked-form" data-create-table-form>
+      <form method="post" action="/connections/${connection.id}/new-table" class="stacked-form" data-create-table-form data-preview-guard hx-sync="this:drop">
         <div class="two-cols">
-          <label>
-            <span>Table name</span>
-            <input name="table_name" value="${escapeAttr(values.table_name || values.name || '')}" required pattern="[A-Za-z_][A-Za-z0-9_]*">
-          </label>
-          <label class="checkbox-card">
-            <input type="checkbox" name="if_not_exists" value="1" ${values.if_not_exists ? 'checked' : ''}>
-            <span>IF NOT EXISTS</span>
-          </label>
+          ${field({
+            label: 'Table name',
+            control: textInput({ name: 'table_name', value: values.table_name || values.name || '', attrs: { required: true, pattern: '[A-Za-z_][A-Za-z0-9_]*' } })
+          })}
+          ${checkboxCard({ name: 'if_not_exists', label: 'IF NOT EXISTS', checked: Boolean(values.if_not_exists) })}
         </div>
         <input type="hidden" name="column_count" value="${escapeAttr(count)}" data-column-count>
         <section class="subsection">
           <header class="section-bar">
             <h2>Columns</h2>
-            <button type="button" class="secondary" data-add-column>Create column</button>
+            ${button({ label: 'Create column', variant: 'secondary', attrs: { 'data-add-column': true } })}
           </header>
           <div class="column-list" data-column-list>
             ${columns.map((column, index) => renderColumnBuilderRow({ column, index, mode: 'create' })).join('')}
@@ -148,32 +170,33 @@ export function renderCreateTablePage({ connection, values = {}, previewSql = ''
         <details class="advanced-block" ${hasAdvancedValues(values) ? 'open' : ''}>
           <summary>Advanced table options</summary>
           <div class="form-grid">
-            <label><span>min_infix_len</span><input name="min_infix_len" value="${escapeAttr(values.min_infix_len || '')}" inputmode="numeric"></label>
-            <label><span>morphology</span><input name="morphology" value="${escapeAttr(values.morphology || '')}" placeholder="stem_en"></label>
-            <label><span>engine</span><select name="engine">
-              <option value="">Default</option>
-              ${['rowwise', 'columnar'].map((engine) => `<option value="${engine}" ${values.engine === engine ? 'selected' : ''}>${engine}</option>`).join('')}
-            </select></label>
-            <label><span>rt_mem_limit</span><input name="rt_mem_limit" value="${escapeAttr(values.rt_mem_limit || '')}" placeholder="128M"></label>
-            <label class="checkbox-card"><input type="checkbox" name="html_strip" value="1" ${values.html_strip ? 'checked' : ''}><span>html_strip='1'</span></label>
+            ${field({ label: 'min_infix_len', control: textInput({ name: 'min_infix_len', value: values.min_infix_len || '', attrs: { inputmode: 'numeric' } }) })}
+            ${field({ label: 'morphology', control: textInput({ name: 'morphology', value: values.morphology || '', attrs: { placeholder: 'stem_en' } }) })}
+            ${field({
+              label: 'engine',
+              control: selectInput({
+                name: 'engine',
+                value: values.engine || '',
+                options: [{ value: '', label: 'Default' }, 'rowwise', 'columnar']
+              })
+            })}
+            ${field({ label: 'rt_mem_limit', control: textInput({ name: 'rt_mem_limit', value: values.rt_mem_limit || '', attrs: { placeholder: '128M' } }) })}
+            ${checkboxCard({ name: 'html_strip', label: "html_strip='1'", checked: Boolean(values.html_strip) })}
           </div>
-          <label>
-            <span>Extra options</span>
-            <textarea name="extra_options" rows="3" placeholder="index_exact_words='1'">${escapeHtml(values.extra_options || '')}</textarea>
-          </label>
+          ${field({
+            label: 'Extra options',
+            control: textareaInput({ name: 'extra_options', value: values.extra_options || '', rows: 3, attrs: { placeholder: "index_exact_words='1'" } })
+          })}
         </details>
-        ${previewSql ? `<label class="sql-preview">
-          <span>SQL preview</span>
-          <textarea readonly rows="8">${escapeHtml(previewSql)}</textarea>
-        </label>
+        ${previewSql ? `${sqlPreviewBlock({ sql: previewSql, rows: 8 })}
         <input type="hidden" name="sql_preview" value="${escapeAttr(previewSql)}">` : ''}
         <div class="form-actions">
-          <button type="submit" name="intent" value="preview">Preview SQL</button>
-          ${showExecute ? `<button type="submit" name="intent" value="execute">Create table</button>` : ''}
+          ${button({ label: 'Preview SQL', submit: true, attrs: { name: 'intent', value: 'preview' } })}
+          ${showExecute ? button({ label: 'Create table', submit: true, attrs: { name: 'intent', value: 'execute' } }) : ''}
         </div>
       </form>
     </section>`
-  });
+  };
 }
 
 export function renderRowEditPage({ connection, table, fields, values = {}, mode, error = '' }) {
@@ -183,18 +206,22 @@ export function renderRowEditPage({ connection, table, fields, values = {}, mode
     ? `/connections/${connection.id}/tables/${encodeURIComponent(table)}/rows/${encodeURIComponent(rowId)}/edit`
     : `/connections/${connection.id}/tables/${encodeURIComponent(table)}/new`;
 
-  return layout({
+  return {
     title: `${title} - ${table}`,
     body: `<section class="panel narrow">
       <p><a href="/connections/${connection.id}/tables/${encodeURIComponent(table)}">Back to ${escapeHtml(table)}</a></p>
       <h1>${escapeHtml(title)}</h1>
       ${renderRowForm({ action, mode, fields, values, error })}
     </section>`
-  });
+  };
+}
+
+function dataPanelLinkAttrs(href) {
+  return { 'hx-get': href, 'hx-target': '#data-panel', 'hx-swap': 'outerHTML', 'hx-push-url': 'true' };
 }
 
 function renderTableList(connection, tables, selected = '') {
-  if (!tables.length) return '<p class="empty">No tables.</p>';
+  if (!tables.length) return emptyState('No tables.');
   return `<ul class="table-list">${tables.map((table) => {
     const href = `/connections/${connection.id}/tables/${encodeURIComponent(table.name)}`;
     return `<li><a class="${table.name === selected ? 'active' : ''}" href="${href}">${escapeHtml(table.name)}${table.type ? ` <small>${escapeHtml(table.type)}</small>` : ''}</a></li>`;
@@ -202,44 +229,53 @@ function renderTableList(connection, tables, selected = '') {
 }
 
 function renderShowCreate(statement) {
-  if (!statement) return '<p class="empty">No SHOW CREATE TABLE output.</p>';
-  return `<label class="sql-preview">
-    <span>SHOW CREATE TABLE</span>
-    <textarea readonly rows="6">${escapeHtml(statement)}</textarea>
-  </label>`;
+  if (!statement) return emptyState('No SHOW CREATE TABLE output.');
+  return sqlPreviewBlock({ sql: statement, label: 'SHOW CREATE TABLE' });
 }
 
 function renderSchema({ connection, table, schema, canAlter }) {
-  if (!schema.length) return '<p class="empty">No schema data.</p>';
+  if (!schema.length) return emptyState('No schema data.');
   const basePath = `/connections/${connection.id}/tables/${encodeURIComponent(table)}`;
-  return `<div class="table-wrap schema-table"><table>
-    <thead><tr><th>Field</th><th>Type</th><th>Properties</th>${canAlter ? '<th>Actions</th>' : ''}</tr></thead>
-    <tbody>${schema.map((field) => `<tr>
-      <td><code>${escapeHtml(field.name)}</code></td>
-      <td>${escapeHtml(field.type)}</td>
-      <td>${escapeHtml(field.properties)}</td>
-      ${canAlter ? `<td>${renderColumnActions(basePath, field, schema)}</td>` : ''}
-    </tr>`).join('')}</tbody>
-  </table></div>
+  const head = ['Field', 'Type', 'Properties'];
+  if (canAlter) head.push('Actions');
+  return `${dataTable({
+    wrapClass: 'schema-table',
+    head,
+    rows: schema.map((schemaField) => {
+      const cells = [
+        `<code>${escapeHtml(schemaField.name)}</code>`,
+        escapeHtml(schemaField.type),
+        escapeHtml(schemaField.properties)
+      ];
+      if (canAlter) cells.push(renderColumnActions(basePath, schemaField, schema));
+      return cells;
+    })
+  })}
   ${canAlter ? renderAddColumnForm(basePath) : '<p class="muted">Schema editing is available only for rt tables.</p>'}`;
 }
 
 function renderDataGrid({ connection, table, columns, rows, page, perPage, search, sort, dir, canWrite }) {
-  if (!columns.length) return '<p class="empty">No data columns.</p>';
+  if (!columns.length) return emptyState('No data columns.');
   const basePath = `/connections/${connection.id}/tables/${encodeURIComponent(table)}`;
-  return `<div class="table-wrap"><table class="data-grid">
-    <thead><tr>${columns.map((column) => `<th>${sortLink({ basePath, column, page, perPage, search, sort, dir })}</th>`).join('')}${canWrite ? '<th>Actions</th>' : ''}</tr></thead>
-    <tbody>
-      ${rows.length ? rows.map((row) => `<tr>${columns.map((column) => `<td><code>${escapeHtml(valueToText(row[column]))}</code></td>`).join('')}${canWrite ? `<td>${renderRowActions(connection, table, row)}</td>` : ''}</tr>`).join('') : `<tr><td colspan="${columns.length + (canWrite ? 1 : 0)}" class="empty">No rows.</td></tr>`}
-    </tbody>
-  </table></div>`;
+  const head = columns.map((column) => sortLink({ basePath, column, page, perPage, search, sort, dir }));
+  if (canWrite) head.push('Actions');
+  return dataTable({
+    tableClass: 'data-grid',
+    head,
+    rows: rows.map((row) => {
+      const cells = columns.map((column) => codeCell(row[column]));
+      if (canWrite) cells.push(renderRowActions(connection, table, row));
+      return cells;
+    }),
+    empty: 'No rows.'
+  });
 }
 
 function sortLink({ basePath, column, page, perPage, search, sort, dir }) {
   const nextDir = sort === column && dir !== 'desc' ? 'desc' : 'asc';
   const href = urlWithParams(basePath, { page, perPage, q: search, sort: column, dir: nextDir });
   const marker = sort === column ? (dir === 'desc' ? ' desc' : ' asc') : '';
-  return `<a href="${escapeAttr(href)}">${escapeHtml(column)}${escapeHtml(marker)}</a>`;
+  return `<a href="${escapeAttr(href)}" hx-get="${escapeAttr(href)}" hx-target="#data-panel" hx-swap="outerHTML" hx-push-url="true">${escapeHtml(column)}${escapeHtml(marker)}</a>`;
 }
 
 function renderRowActions(connection, table, row) {
@@ -249,51 +285,40 @@ function renderRowActions(connection, table, row) {
   const rowId = encodeURIComponent(String(row.id));
   const tablePath = `/connections/${connection.id}/tables/${encodeURIComponent(table)}`;
   return `<div class="button-row compact">
-    <a class="button secondary" href="${tablePath}/rows/${rowId}/edit">Edit</a>
-    <a class="button secondary danger-link" href="${tablePath}/rows/${rowId}/delete">Delete</a>
+    ${button({ label: 'Edit', href: `${tablePath}/rows/${rowId}/edit`, variant: 'secondary' })}
+    ${button({ label: 'Delete', href: `${tablePath}/rows/${rowId}/delete`, variant: 'secondary danger-link' })}
   </div>`;
 }
 
-function renderColumnActions(basePath, field, schema) {
-  if (field.name === 'id') return '<span class="muted">Implicit</span>';
-  const encoded = encodeURIComponent(field.name);
+function renderColumnActions(basePath, schemaField, schema) {
+  if (schemaField.name === 'id') return '<span class="muted">Implicit</span>';
+  const encoded = encodeURIComponent(schemaField.name);
   const attributeCount = schema.filter(isAttributeLike).length;
-  const canDrop = !(isAttributeLike(field) && attributeCount <= 1);
+  const canDrop = !(isAttributeLike(schemaField) && attributeCount <= 1);
   return `<div class="button-row compact">
-    ${canWidenToBigint(field) ? `<a class="button secondary" href="${basePath}/columns/${encoded}/modify-bigint">Widen to bigint</a>` : ''}
-    ${canDrop ? `<a class="button secondary danger-link" href="${basePath}/columns/${encoded}/drop">Drop</a>` : '<span class="muted">Last attribute</span>'}
+    ${canWidenToBigint(schemaField) ? button({ label: 'Widen to bigint', href: `${basePath}/columns/${encoded}/modify-bigint`, variant: 'secondary' }) : ''}
+    ${canDrop ? button({ label: 'Drop', href: `${basePath}/columns/${encoded}/drop`, variant: 'secondary danger-link' }) : '<span class="muted">Last attribute</span>'}
   </div>`;
 }
 
 function renderAddColumnForm(basePath) {
-  return `<form method="post" action="${basePath}/columns/add" class="stacked-form add-column-form" data-column-kind>
+  return `<form method="post" action="${basePath}/columns/add" class="stacked-form add-column-form" data-column-kind hx-sync="this:drop">
     <h3>Add column</h3>
     <div class="form-grid">
-      <label>
-        <span>Name</span>
-        <input name="column_name" required pattern="[A-Za-z_][A-Za-z0-9_]*">
-      </label>
-      <label>
-        <span>Type</span>
-        <select name="column_type" data-column-type>
-          ${alterColumnTypes.map((type) => `<option value="${type}" ${type === 'string' ? 'selected' : ''}>${type}</option>`).join('')}
-        </select>
-      </label>
-      <label class="checkbox-card column-modifier">
-        <input type="checkbox" name="column_indexed" value="1">
-        <span>indexed</span>
-      </label>
-      <label class="checkbox-card column-modifier">
-        <input type="checkbox" name="column_attribute" value="1">
-        <span>attribute</span>
-      </label>
-      <label class="checkbox-card json-option">
-        <input type="checkbox" name="column_secondary_index" value="1">
-        <span>secondary_index='1'</span>
-      </label>
+      ${field({
+        label: 'Name',
+        control: textInput({ name: 'column_name', attrs: { required: true, pattern: '[A-Za-z_][A-Za-z0-9_]*' } })
+      })}
+      ${field({
+        label: 'Type',
+        control: selectInput({ name: 'column_type', value: 'string', options: alterColumnTypes, attrs: { 'data-column-type': true } })
+      })}
+      ${checkboxCard({ name: 'column_indexed', label: 'indexed', classes: 'checkbox-card column-modifier' })}
+      ${checkboxCard({ name: 'column_attribute', label: 'attribute', classes: 'checkbox-card column-modifier' })}
+      ${checkboxCard({ name: 'column_secondary_index', label: "secondary_index='1'", classes: 'checkbox-card json-option' })}
     </div>
     <div class="form-actions">
-      <button type="submit" name="intent" value="preview">Preview ADD COLUMN SQL</button>
+      ${button({ label: 'Preview ADD COLUMN SQL', submit: true, attrs: { name: 'intent', value: 'preview' } })}
     </div>
   </form>`;
 }
@@ -304,41 +329,45 @@ function renderColumnBuilderRow({ column = {}, index, mode }) {
   const prefix = `col_${index}_`;
   return `<div class="column-row" data-column-row>
     <div class="column-row-main">
-      <label>
-        <span>Name</span>
-        <input name="${prefix}name" value="${escapeAttr(column.name || '')}" required pattern="[A-Za-z_][A-Za-z0-9_]*">
-      </label>
-      <label>
-        <span>Type</span>
-        <select name="${prefix}type" data-column-type>
-          ${types.map((candidate) => `<option value="${candidate}" ${candidate === type ? 'selected' : ''}>${candidate}</option>`).join('')}
-        </select>
-      </label>
-      <button type="button" class="secondary compact-remove" data-remove-column>Remove</button>
+      ${field({
+        label: 'Name',
+        control: textInput({ name: `${prefix}name`, value: column.name || '', attrs: { required: true, pattern: '[A-Za-z_][A-Za-z0-9_]*' } })
+      })}
+      ${field({
+        label: 'Type',
+        control: selectInput({ name: `${prefix}type`, value: type, options: types, attrs: { 'data-column-type': true } })
+      })}
+      ${button({ label: 'Remove', variant: 'secondary compact-remove', attrs: { 'data-remove-column': true } })}
     </div>
     <div class="column-flags" data-column-kind>
-      <label class="checkbox-card column-modifier">
-        <input type="checkbox" name="${prefix}indexed" value="1" ${column.indexed || (!column.type && mode === 'create') ? 'checked' : ''}>
-        <span>indexed</span>
-      </label>
-      <label class="checkbox-card column-modifier ${mode === 'alter' ? 'hidden' : ''}">
-        <input type="checkbox" name="${prefix}stored" value="1" ${column.stored || (!column.type && mode === 'create') ? 'checked' : ''}>
-        <span>stored</span>
-      </label>
-      <label class="checkbox-card column-modifier">
-        <input type="checkbox" name="${prefix}attribute" value="1" ${column.attribute ? 'checked' : ''}>
-        <span>attribute</span>
-      </label>
-      <label class="checkbox-card json-option">
-        <input type="checkbox" name="${prefix}secondary_index" value="1" ${column.secondary_index ? 'checked' : ''}>
-        <span>secondary_index='1'</span>
-      </label>
+      ${checkboxCard({
+        name: `${prefix}indexed`,
+        label: 'indexed',
+        checked: Boolean(column.indexed || (!column.type && mode === 'create')),
+        classes: 'checkbox-card column-modifier'
+      })}
+      ${checkboxCard({
+        name: `${prefix}stored`,
+        label: 'stored',
+        checked: Boolean(column.stored || (!column.type && mode === 'create')),
+        classes: `checkbox-card column-modifier${mode === 'alter' ? ' hidden' : ''}`
+      })}
+      ${checkboxCard({
+        name: `${prefix}attribute`,
+        label: 'attribute',
+        checked: Boolean(column.attribute),
+        classes: 'checkbox-card column-modifier'
+      })}
+      ${checkboxCard({
+        name: `${prefix}secondary_index`,
+        label: "secondary_index='1'",
+        checked: Boolean(column.secondary_index),
+        classes: 'checkbox-card json-option'
+      })}
       <div class="vector-options">
-        <label><span>knn_type</span><input name="${prefix}knn_type" value="${escapeAttr(column.knn_type || 'hnsw')}"></label>
-        <label><span>knn_dims</span><input name="${prefix}knn_dims" value="${escapeAttr(column.knn_dims || '')}" inputmode="numeric"></label>
-        <label><span>similarity</span><select name="${prefix}hnsw_similarity">
-          ${['l2', 'ip', 'cosine'].map((similarity) => `<option value="${similarity}" ${similarity === (column.hnsw_similarity || 'l2') ? 'selected' : ''}>${similarity}</option>`).join('')}
-        </select></label>
+        ${field({ label: 'knn_type', control: textInput({ name: `${prefix}knn_type`, value: column.knn_type || 'hnsw' }) })}
+        ${field({ label: 'knn_dims', control: textInput({ name: `${prefix}knn_dims`, value: column.knn_dims || '', attrs: { inputmode: 'numeric' } }) })}
+        ${field({ label: 'similarity', control: selectInput({ name: `${prefix}hnsw_similarity`, value: column.hnsw_similarity || 'l2', options: ['l2', 'ip', 'cosine'] }) })}
       </div>
     </div>
   </div>`;
@@ -379,24 +408,13 @@ function hasAdvancedValues(values) {
     .some((key) => Boolean(values[key]));
 }
 
-function isAttributeLike(field) {
-  const type = String(field.type || '').toLowerCase();
-  if (field.name === 'id') return false;
-  if (type.includes('text')) return String(field.properties || '').toLowerCase().includes('attribute');
+function isAttributeLike(schemaField) {
+  const type = String(schemaField.type || '').toLowerCase();
+  if (schemaField.name === 'id') return false;
+  if (type.includes('text')) return String(schemaField.properties || '').toLowerCase().includes('attribute');
   return true;
 }
 
-function canWidenToBigint(field) {
-  return ['int', 'integer', 'uint'].includes(String(field.type || '').toLowerCase());
-}
-
-function renderPagination({ basePath, page, maxPage, perPage, search, sort, dir }) {
-  if (maxPage <= 1) return '';
-  const previous = Math.max(1, page - 1);
-  const next = Math.min(maxPage, page + 1);
-  return `<nav class="pagination">
-    <a class="button secondary ${page === 1 ? 'disabled' : ''}" href="${escapeAttr(urlWithParams(basePath, { page: previous, perPage, q: search, sort, dir }))}">Previous</a>
-    <span>Page ${escapeHtml(page)} of ${escapeHtml(maxPage)}</span>
-    <a class="button secondary ${page === maxPage ? 'disabled' : ''}" href="${escapeAttr(urlWithParams(basePath, { page: next, perPage, q: search, sort, dir }))}">Next</a>
-  </nav>`;
+function canWidenToBigint(schemaField) {
+  return ['int', 'integer', 'uint'].includes(String(schemaField.type || '').toLowerCase());
 }

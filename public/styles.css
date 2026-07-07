@@ -1005,6 +1005,115 @@ details[open] > label {
   background-clip: padding-box;
 }
 
+/* ======================================================================
+   htmx integration
+   Request/loading states plus the shared toast region. Reuses the
+   existing tokens (accent/danger/success, spinner, alert) — no new
+   colors and no layout changes at rest.
+   ====================================================================== */
+
+/* In-flight links/buttons: visible busy state, repeat clicks swallowed. */
+a.htmx-request,
+.button.htmx-request {
+  opacity: 0.6;
+  pointer-events: none;
+}
+
+button.htmx-request,
+form.htmx-request button[type="submit"] {
+  opacity: 0.75;
+  pointer-events: none;
+}
+
+button.htmx-request::before,
+form.htmx-request button[type="submit"]::before {
+  content: "";
+  width: 0.85em;
+  height: 0.85em;
+  margin-right: 0.45em;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  flex: none;
+  animation: spin 0.62s linear infinite;
+}
+
+html:has(.htmx-request) {
+  cursor: progress;
+}
+
+/* Inline indicators (the console's "Running…") are hidden at rest. */
+.htmx-indicator {
+  display: none;
+}
+
+.htmx-request.htmx-indicator,
+.htmx-request .htmx-indicator {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* --- Toast region (shared error/warning/success feedback) ------------ */
+
+.toast-region {
+  position: fixed;
+  right: 1rem;
+  bottom: 1rem;
+  z-index: 30;
+  display: grid;
+  gap: 0.6rem;
+  width: min(420px, calc(100vw - 2rem));
+  pointer-events: none;
+}
+
+.toast {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.6rem;
+  pointer-events: auto;
+  box-shadow: var(--shadow-lift);
+}
+
+.toast-message {
+  overflow-wrap: anywhere;
+}
+
+.toast-close {
+  min-height: auto;
+  padding: 0 0.2rem;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font-weight: 700;
+  line-height: 1.2;
+  cursor: pointer;
+}
+
+.toast-close:hover {
+  transform: none;
+  box-shadow: none;
+  filter: brightness(1.2);
+}
+
+.toast.leaving {
+  animation: toast-leave 0.26s var(--ease) both;
+  pointer-events: none;
+}
+
+@keyframes toast-leave {
+  to {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+}
+
+.alert-success {
+  border-color: rgba(156, 227, 125, 0.35);
+  background: rgba(156, 227, 125, 0.12);
+  color: #d8f5c9;
+}
+
 /* --- Respect reduced-motion preferences ------------------------------ */
 
 @media (prefers-reduced-motion: reduce) {

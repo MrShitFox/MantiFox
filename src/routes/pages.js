@@ -15,6 +15,7 @@ import {
   hasResultErrors,
   insertDocument,
   listTables,
+  ping,
   replaceDocument,
   requireRealtimeTable,
   runSql,
@@ -31,13 +32,57 @@ import {
   updateConnection
 } from '../db.js';
 import { createLoginSession, destroyRequestSession, expiredSessionCookie, verifyAdminPassword } from '../auth.js';
-import { clampInteger, pathParts, readForm, redirect, sendHtml } from '../router.js';
-import { layout } from '../views/layout.js';
-import { renderBrowsePage, renderConnectionPage, renderCreateTablePage, renderRowEditPage } from '../views/browse.js';
-import { renderConsolePage } from '../views/console.js';
+import { clampInteger, htmxTarget, isHtmx, pathParts, readForm, redirect, sendHtml } from '../router.js';
+import { escapeHtml } from '../html.js';
+import { fragment, layout } from '../views/layout.js';
+import {
+  renderBrowseDataPanel,
+  renderBrowsePage,
+  renderConnectionPage,
+  renderCreateTablePage,
+  renderRowEditPage
+} from '../views/browse.js';
+import { renderConsolePage, renderConsoleResults } from '../views/console.js';
 import { renderDashboardPage, renderEditConnectionPage } from '../views/dashboard.js';
 import { renderLoginPage } from '../views/login.js';
-import { renderOperationPage, renderSqlPreviewForm } from '../views/components.js';
+import { renderOperationPage, renderSqlPreviewForm, renderToastsOob } from '../views/components.js';
+
+// The same URL answers both ways: a full page for direct loads and a fragment
+// for htmx requests, so every screen stays deep-linkable and refreshable.
+const pageHeaders = { Vary: 'HX-Request, HX-Target' };
+
+// views are { title, body }. For htmx requests this sends the #main fragment
+// (plus <title> and out-of-band toasts); pushUrl updates the address bar after
+// successful POSTs (the non-htmx path keeps its 303 redirect instead).
+function respond(req, res, status, view, { pushUrl, toasts = [] } = {}) {
+  if (isHtmx(req)) {
+    const headers = { ...pageHeaders };
+    if (pushUrl) headers['HX-Push-Url'] = pushUrl;
+    return sendHtml(res, status, fragment({ ...view, toasts }), headers);
+  }
+  return sendHtml(res, status, layout(view), pageHeaders);
+}
+
+// Failures that are not a form re-render keep the current content on screen:
+// the body carries only out-of-band toasts, HX-Reswap:none skips the main swap
+// and HX-Push-Url:false stops the URL from moving to a page that never loaded.
+function respondToastError(res, status, messages) {
+  const list = Array.isArray(messages) ? messages : [{ type: 'error', message: String(messages) }];
+  const toasts = list.map((entry) => (typeof entry === 'string' ? { type: 'error', message: entry } : entry));
+  return sendHtml(res, status, renderToastsOob(toasts), {
+    ...pageHeaders,
+    'HX-Reswap': 'none',
+    'HX-Push-Url': 'false'
+  });
+}
+
+function respondNotFound(req, res, message = 'Not found') {
+  if (isHtmx(req)) return respondToastError(res, 404, message);
+  return sendHtml(res, 404, layout({
+    title: message,
+    body: `<section class="panel"><h1>${escapeHtml(message)}</h1></section>`
+  }), pageHeaders);
+}
 
 export async function handleLogin(req, res) {
   if (req.method === 'GET') {
@@ -65,19 +110,23 @@ export async function handlePages(req, res, url) {
     }
 
     if (req.method === 'GET' && url.pathname === '/') {
-      return sendHtml(res, 200, renderDashboardPage({ connections: listConnections() }));
+      return respond(req, res, 200, renderDashboardPage({ connections: listConnections() }));
     }
 
     if (parts[0] === 'connections') {
-      return handleConnectionPages(req, res, url, parts.slice(1));
+      return await handleConnectionPages(req, res, url, parts.slice(1));
     }
 
-    return sendHtml(res, 404, layout({ title: 'Not found', body: '<section class="panel"><h1>Not found</h1></section>' }));
+    return respondNotFound(req, res);
   } catch (error) {
-    return sendHtml(res, error.statusCode || 500, layout({
+    const status = error.statusCode || 500;
+    if (isHtmx(req)) {
+      return respondToastError(res, status, error.message || 'Internal server error');
+    }
+    return sendHtml(res, status, layout({
       title: 'Error',
-      body: `<section class="panel narrow"><h1>Error</h1><p>${escapeForError(error.message)}</p></section>`
-    }));
+      body: `<section class="panel narrow"><h1>Error</h1><p>${escapeHtml(error.message || 'Internal server error')}</p></section>`
+    }), pageHeaders);
   }
 }
 
@@ -86,48 +135,75 @@ async function handleConnectionPages(req, res, url, parts) {
     const form = await readForm(req);
     try {
       const connection = createConnection(form);
+      if (isHtmx(req)) {
+        return respondConnectionHome(req, res, connection, {
+          pushUrl: `/connections/${connection.id}`,
+          toasts: [{ type: 'success', message: 'Connection saved' }]
+        });
+      }
       return redirect(res, `/connections/${connection.id}`);
     } catch (error) {
-      return sendHtml(res, 400, renderDashboardPage({ connections: listConnections(), error: error.message }));
+      return respond(req, res, 400, renderDashboardPage({ connections: listConnections(), error: error.message, values: form }));
     }
   }
 
   const id = Number.parseInt(parts[0], 10);
   const connection = getConnection(id);
   if (!connection) {
-    return sendHtml(res, 404, layout({ title: 'Connection not found', body: '<section class="panel"><h1>Connection not found</h1></section>' }));
+    return respondNotFound(req, res, 'Connection not found');
   }
 
   if (parts.length === 1 && req.method === 'GET') {
-    return renderConnectionHome(res, connection);
+    return respondConnectionHome(req, res, connection);
   }
 
   if (parts.length === 2 && parts[1] === 'edit') {
     if (req.method === 'GET') {
-      return sendHtml(res, 200, renderEditConnectionPage({ connection }));
+      return respond(req, res, 200, renderEditConnectionPage({ connection }));
     }
     if (req.method === 'POST') {
       const form = await readForm(req);
       try {
         updateConnection(id, form);
+        if (isHtmx(req)) {
+          return respond(req, res, 200, renderDashboardPage({ connections: listConnections() }), {
+            pushUrl: '/',
+            toasts: [{ type: 'success', message: 'Connection updated' }]
+          });
+        }
         return redirect(res, '/');
       } catch (error) {
-        return sendHtml(res, 400, renderEditConnectionPage({ connection, error: error.message }));
+        return respond(req, res, 400, renderEditConnectionPage({ connection, error: error.message }));
       }
     }
   }
 
   if (parts.length === 2 && parts[1] === 'delete' && req.method === 'POST') {
     deleteConnection(id);
+    if (isHtmx(req)) {
+      return respond(req, res, 200, renderDashboardPage({ connections: listConnections() }), {
+        pushUrl: '/',
+        toasts: [{ type: 'success', message: 'Connection deleted' }]
+      });
+    }
     return redirect(res, '/');
   }
 
-  if (parts.length === 2 && parts[1] === 'console' && req.method === 'GET') {
-    return sendHtml(res, 200, renderConsolePage({ connection }));
+  if (parts.length === 2 && parts[1] === 'test' && req.method === 'POST') {
+    return handleTestConnection(req, res, connection);
+  }
+
+  if (parts.length === 2 && parts[1] === 'console') {
+    if (req.method === 'GET') {
+      return respond(req, res, 200, renderConsolePage({ connection }));
+    }
+    if (req.method === 'POST') {
+      return handleConsoleRun(req, res, connection);
+    }
   }
 
   if (parts.length === 2 && parts[1] === 'new-table') {
-    if (req.method === 'GET') return renderCreateTableForm(res, connection);
+    if (req.method === 'GET') return renderCreateTableForm(req, res, connection);
     if (req.method === 'POST') return handleCreateTable(req, res, connection);
   }
 
@@ -135,50 +211,111 @@ async function handleConnectionPages(req, res, url, parts) {
     return handleTablePages(req, res, url, connection, parts.slice(2));
   }
 
-  return sendHtml(res, 404, layout({ title: 'Not found', body: '<section class="panel"><h1>Not found</h1></section>' }));
+  return respondNotFound(req, res);
 }
 
-async function renderConnectionHome(res, connection) {
+async function respondConnectionHome(req, res, connection, { pushUrl, toasts = [] } = {}) {
   try {
     const { results, tables } = await listTables(connection);
-    return sendHtml(res, 200, renderConnectionPage({
+    return respond(req, res, 200, renderConnectionPage({
       connection,
       tables,
       messages: collectMessages(results)
-    }));
+    }), { pushUrl, toasts });
   } catch (error) {
-    return sendHtml(res, 502, renderConnectionPage({ connection, error: error.message }));
+    // Still a navigable destination: the connection page renders with an
+    // inline error and working links, mirroring the non-htmx behaviour.
+    return respond(req, res, 502, renderConnectionPage({ connection, error: error.message }), { pushUrl, toasts });
   }
+}
+
+async function handleTestConnection(req, res, connection) {
+  if (!isHtmx(req)) return redirect(res, '/');
+  try {
+    const results = await ping(connection);
+    const failed = hasResultErrors(results);
+    const text = failed
+      ? (collectMessages(results).map((message) => `${message.statement ? `Statement ${message.statement}: ` : ''}${message.message}`).join('\n') || 'Connection test failed')
+      : '✓ Connected';
+    return sendHtml(res, failed ? 502 : 200, renderTestOutput(connection.id, failed, text), pageHeaders);
+  } catch (error) {
+    return sendHtml(res, 502, renderTestOutput(connection.id, true, error.message), pageHeaders);
+  }
+}
+
+function renderTestOutput(id, failed, text) {
+  return `<p class="test-output ${failed ? 'error-text' : 'success-text'}" id="test-output-${id}">${escapeHtml(text)}</p>`;
+}
+
+async function handleConsoleRun(req, res, connection) {
+  const form = await readForm(req);
+  const sql = String(form.sql || '');
+
+  if (!sql.trim()) {
+    if (isHtmx(req)) return sendHtml(res, 400, renderConsoleResults({ error: 'SQL is required' }), pageHeaders);
+    return respond(req, res, 400, renderConsolePage({ connection, sql, error: 'SQL is required' }));
+  }
+
+  try {
+    const results = await runSql(connection, sql);
+    if (isHtmx(req)) return sendHtml(res, 200, renderConsoleResults({ results }), pageHeaders);
+    return respond(req, res, 200, renderConsolePage({ connection, sql, results }));
+  } catch (error) {
+    const status = error.statusCode || 502;
+    if (isHtmx(req)) return sendHtml(res, status, renderConsoleResults({ error: error.message }), pageHeaders);
+    return respond(req, res, status, renderConsolePage({ connection, sql, error: error.message }));
+  }
+}
+
+function queryFromUrl(url) {
+  return {
+    page: url.searchParams.get('page'),
+    perPage: url.searchParams.get('perPage'),
+    q: url.searchParams.get('q') || '',
+    sort: url.searchParams.get('sort') || '',
+    dir: url.searchParams.get('dir')
+  };
 }
 
 async function handleTablePages(req, res, url, connection, parts) {
   const table = parts[0];
-  if (!table) return renderConnectionHome(res, connection);
+  if (!table) return respondConnectionHome(req, res, connection);
 
   if (parts.length === 1 && req.method === 'GET') {
-    return renderBrowse(req, res, url, connection, table);
+    return renderBrowse(req, res, connection, table, queryFromUrl(url));
   }
 
   if (parts.length === 2 && parts[1] === 'drop') {
-    if (req.method === 'GET') return renderTableSqlPreview(res, connection, table, 'Drop table', buildDropTableSql(table), {
-      submitLabel: 'Drop table',
-      destructive: true
-    });
-    if (req.method === 'POST') return handleRunTableSql(req, res, connection, table, buildDropTableSql(table), {
-      successRedirect: `/connections/${connection.id}`,
-      title: 'Drop table'
-    });
+    if (req.method === 'GET') {
+      return renderTableSqlPreview(req, res, connection, table, 'Drop table', buildDropTableSql(table), {
+        submitLabel: 'Drop table',
+        destructive: true
+      });
+    }
+    if (req.method === 'POST') {
+      return handleRunTableSql(req, res, connection, table, buildDropTableSql(table), {
+        title: 'Drop table',
+        successMessage: 'Table dropped',
+        destination: 'connection',
+        backHref: `/connections/${connection.id}`
+      });
+    }
   }
 
   if (parts.length === 2 && parts[1] === 'truncate') {
-    if (req.method === 'GET') return renderTableSqlPreview(res, connection, table, 'Truncate table', buildTruncateTableSql(table), {
-      submitLabel: 'Truncate table',
-      destructive: true
-    });
-    if (req.method === 'POST') return handleRunTableSql(req, res, connection, table, buildTruncateTableSql(table), {
-      successRedirect: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`,
-      title: 'Truncate table'
-    });
+    if (req.method === 'GET') {
+      return renderTableSqlPreview(req, res, connection, table, 'Truncate table', buildTruncateTableSql(table), {
+        submitLabel: 'Truncate table',
+        destructive: true
+      });
+    }
+    if (req.method === 'POST') {
+      return handleRunTableSql(req, res, connection, table, buildTruncateTableSql(table), {
+        title: 'Truncate table',
+        successMessage: 'Table truncated',
+        destination: 'browse'
+      });
+    }
   }
 
   if (parts.length === 3 && parts[1] === 'columns' && parts[2] === 'add' && req.method === 'POST') {
@@ -186,42 +323,39 @@ async function handleTablePages(req, res, url, connection, parts) {
   }
 
   if (parts.length === 4 && parts[1] === 'columns' && parts[3] === 'drop') {
-    if (req.method === 'GET') return renderDropColumnPreview(res, connection, table, parts[2]);
+    if (req.method === 'GET') return renderDropColumnPreview(req, res, connection, table, parts[2]);
     if (req.method === 'POST') return handleDropColumn(req, res, connection, table, parts[2]);
   }
 
   if (parts.length === 4 && parts[1] === 'columns' && parts[3] === 'modify-bigint') {
-    if (req.method === 'GET') return renderModifyColumnPreview(res, connection, table, parts[2]);
+    if (req.method === 'GET') return renderModifyColumnPreview(req, res, connection, table, parts[2]);
     if (req.method === 'POST') return handleModifyColumn(req, res, connection, table, parts[2]);
   }
 
   if (parts.length === 2 && parts[1] === 'new') {
-    if (req.method === 'GET') return renderInsertForm(res, connection, table);
+    if (req.method === 'GET') return renderInsertForm(req, res, connection, table);
     if (req.method === 'POST') return handleInsertRow(req, res, connection, table);
   }
 
   if (parts.length === 4 && parts[1] === 'rows' && parts[3] === 'edit') {
-    if (req.method === 'GET') return renderEditForm(res, connection, table, parts[2]);
+    if (req.method === 'GET') return renderEditForm(req, res, connection, table, parts[2]);
     if (req.method === 'POST') return handleEditRow(req, res, connection, table, parts[2]);
   }
 
-  if (parts.length === 4 && parts[1] === 'rows' && parts[3] === 'delete' && req.method === 'POST') {
-    return handleDeleteRow(req, res, connection, table, parts[2]);
+  if (parts.length === 4 && parts[1] === 'rows' && parts[3] === 'delete') {
+    if (req.method === 'GET') return renderDeleteRowPreview(req, res, connection, table, parts[2]);
+    if (req.method === 'POST') return handleDeleteRow(req, res, connection, table, parts[2]);
   }
 
-  if (parts.length === 4 && parts[1] === 'rows' && parts[3] === 'delete' && req.method === 'GET') {
-    return renderDeleteRowPreview(res, connection, table, parts[2]);
-  }
-
-  return sendHtml(res, 404, layout({ title: 'Not found', body: '<section class="panel"><h1>Not found</h1></section>' }));
+  return respondNotFound(req, res);
 }
 
-async function renderBrowse(req, res, url, connection, table) {
-  let page = clampInteger(url.searchParams.get('page'), 1, 1, 1000000);
-  const perPage = clampInteger(url.searchParams.get('perPage'), 25, 1, 200);
-  const search = url.searchParams.get('q') || '';
-  const dir = url.searchParams.get('dir') === 'desc' ? 'desc' : 'asc';
-  let sort = url.searchParams.get('sort') || '';
+async function renderBrowse(req, res, connection, table, query, extras = {}) {
+  let page = clampInteger(query.page, 1, 1, 1000000);
+  const perPage = clampInteger(query.perPage, 25, 1, 200);
+  const search = query.q || '';
+  const dir = query.dir === 'desc' ? 'desc' : 'asc';
+  let sort = query.sort || '';
 
   try {
     const tablesData = await listTables(connection);
@@ -252,7 +386,27 @@ async function renderBrowse(req, res, url, connection, table) {
       ...collectMessages(showCreateData.results)
     ];
 
-    return sendHtml(res, 200, renderBrowsePage({
+    // Search / sort / pagination swap only the data panel; any Manticore
+    // messages go to the shared toast region since the inline message area
+    // above the grid is not part of this fragment.
+    if (isHtmx(req) && htmxTarget(req) === 'data-panel') {
+      const canWrite = (tableMeta?.type || '') === 'rt';
+      const panel = renderBrowseDataPanel({
+        connection,
+        table,
+        rowsResult: rowsResults[0],
+        total: countData.total,
+        page,
+        perPage,
+        search,
+        sort,
+        dir,
+        canWrite
+      });
+      return sendHtml(res, 200, renderToastsOob(messages) + panel, pageHeaders);
+    }
+
+    return respond(req, res, 200, renderBrowsePage({
       connection,
       table,
       tables: tablesData.tables,
@@ -268,14 +422,32 @@ async function renderBrowse(req, res, url, connection, table) {
       dir,
       showCreateStatement: showCreateData.statement,
       messages
-    }));
+    }), extras);
   } catch (error) {
-    return sendHtml(res, 502, renderBrowsePage({ connection, table, error: error.message }));
+    if (isHtmx(req)) {
+      // Keep the grid and whatever the user typed; explain in the toast region.
+      return respondToastError(res, error.statusCode || 502, [
+        ...(extras.toasts || []),
+        { type: 'error', message: error.message }
+      ]);
+    }
+    return respond(req, res, 502, renderBrowsePage({ connection, table, error: error.message }));
   }
 }
 
-async function renderCreateTableForm(res, connection, values = {}, previewSql = '', showExecute = false, error = '') {
-  return sendHtml(res, error ? 400 : 200, renderCreateTablePage({
+// Shared success landing for row/column/table actions that return to browse.
+function browseSuccess(req, res, connection, table, message) {
+  if (isHtmx(req)) {
+    return renderBrowse(req, res, connection, table, {}, {
+      pushUrl: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`,
+      toasts: [{ type: 'success', message }]
+    });
+  }
+  return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+}
+
+async function renderCreateTableForm(req, res, connection, values = {}, previewSql = '', showExecute = false, error = '') {
+  return respond(req, res, error ? 400 : 200, renderCreateTablePage({
     connection,
     values,
     previewSql,
@@ -291,17 +463,23 @@ async function handleCreateTable(req, res, connection) {
     sql = buildCreateTableSql(form);
     if (form.intent === 'execute') {
       if (!samePreviewSql(form.sql_preview, sql)) {
-        return renderCreateTableForm(res, connection, form, sql, true, 'Review the updated SQL preview before creating the table.');
+        return renderCreateTableForm(req, res, connection, form, sql, true, 'Review the updated SQL preview before creating the table.');
       }
       const results = await runSql(connection, sql);
       if (collectMessages(results).length) {
-        return renderWriteResult(res, connection, form.table_name || '', 'Create table result', results, `/connections/${connection.id}`);
+        return renderWriteResult(req, res, connection, form.table_name || '', 'Create table result', results, `/connections/${connection.id}`);
+      }
+      if (isHtmx(req)) {
+        return respondConnectionHome(req, res, connection, {
+          pushUrl: `/connections/${connection.id}`,
+          toasts: [{ type: 'success', message: 'Table created' }]
+        });
       }
       return redirect(res, `/connections/${connection.id}`);
     }
-    return renderCreateTableForm(res, connection, form, sql, true);
+    return renderCreateTableForm(req, res, connection, form, sql, true);
   } catch (error) {
-    return renderCreateTableForm(res, connection, form, sql, false, error.message);
+    return renderCreateTableForm(req, res, connection, form, sql, false, error.message);
   }
 }
 
@@ -319,10 +497,10 @@ async function loadTableContext(connection, table, action) {
   return { tableMeta, fields: schemaData.fields, tablesData, schemaData };
 }
 
-async function renderTableSqlPreview(res, connection, table, title, sql, options = {}) {
+async function renderTableSqlPreview(req, res, connection, table, title, sql, options = {}) {
   try {
     await loadTableContext(connection, table, title);
-    return sendHtml(res, 200, layout({
+    return respond(req, res, 200, {
       title,
       body: renderSqlPreviewForm({
         title,
@@ -332,16 +510,16 @@ async function renderTableSqlPreview(res, connection, table, title, sql, options
         destructive: Boolean(options.destructive),
         backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
       })
-    }));
+    });
   } catch (error) {
-    return renderTableActionError(res, connection, table, title, error.message);
+    return renderTableActionError(req, res, connection, table, title, error.message);
   }
 }
 
 async function handleRunTableSql(req, res, connection, table, sql, options = {}) {
   const form = await readForm(req);
   if (!samePreviewSql(form.sql_preview, sql)) {
-    return renderTableSqlPreview(res, connection, table, options.title || 'Table action', sql, {
+    return renderTableSqlPreview(req, res, connection, table, options.title || 'Table action', sql, {
       submitLabel: options.title || 'Run',
       destructive: true
     });
@@ -350,11 +528,20 @@ async function handleRunTableSql(req, res, connection, table, sql, options = {})
     await loadTableContext(connection, table, options.title || 'Table action');
     const results = await runSql(connection, sql);
     if (collectMessages(results).length) {
-      return renderWriteResult(res, connection, table, `${options.title || 'Table action'} result`, results, options.successRedirect || `/connections/${connection.id}`);
+      return renderWriteResult(req, res, connection, table, `${options.title || 'Table action'} result`, results, options.backHref);
     }
-    return redirect(res, options.successRedirect || `/connections/${connection.id}`);
+    if (options.destination === 'connection') {
+      if (isHtmx(req)) {
+        return respondConnectionHome(req, res, connection, {
+          pushUrl: `/connections/${connection.id}`,
+          toasts: [{ type: 'success', message: options.successMessage || `${options.title} done` }]
+        });
+      }
+      return redirect(res, `/connections/${connection.id}`);
+    }
+    return browseSuccess(req, res, connection, table, options.successMessage || `${options.title} done`);
   } catch (error) {
-    return renderTableActionError(res, connection, table, options.title || 'Table action failed', error.message);
+    return renderTableActionError(req, res, connection, table, `${options.title || 'Table action'} failed`, error.message);
   }
 }
 
@@ -369,25 +556,26 @@ async function handleAddColumn(req, res, connection, table) {
     const action = `/connections/${connection.id}/tables/${encodeURIComponent(table)}/columns/add`;
     if (form.intent === 'execute') {
       if (!samePreviewSql(form.sql_preview, sql)) {
-        return renderColumnSqlPreview(res, connection, table, 'Add column', sql, action, form, false);
+        return renderColumnSqlPreview(req, res, connection, table, 'Add column', sql, action, form, false);
       }
       const results = await runSql(connection, sql);
       if (collectMessages(results).length) {
-        return renderWriteResult(res, connection, table, 'Add column result', results);
+        return renderWriteResult(req, res, connection, table, 'Add column result', results);
       }
-      return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+      return browseSuccess(req, res, connection, table, 'Column added');
     }
-    return renderColumnSqlPreview(res, connection, table, 'Add column', sql, action, form, false);
+    return renderColumnSqlPreview(req, res, connection, table, 'Add column', sql, action, form, false);
   } catch (error) {
-    return renderTableActionError(res, connection, table, 'Add column failed', error.message);
+    return renderTableActionError(req, res, connection, table, 'Add column failed', error.message);
   }
 }
 
-async function renderDropColumnPreview(res, connection, table, column) {
+async function renderDropColumnPreview(req, res, connection, table, column) {
   try {
     const { fields } = await loadTableContext(connection, table, 'DROP COLUMN');
     const sql = buildAlterDropColumnSql(table, column, fields);
     return renderColumnSqlPreview(
+      req,
       res,
       connection,
       table,
@@ -398,7 +586,7 @@ async function renderDropColumnPreview(res, connection, table, column) {
       true
     );
   } catch (error) {
-    return renderTableActionError(res, connection, table, 'Drop column failed', error.message);
+    return renderTableActionError(req, res, connection, table, 'Drop column failed', error.message);
   }
 }
 
@@ -408,21 +596,24 @@ async function handleDropColumn(req, res, connection, table, column) {
     const { fields } = await loadTableContext(connection, table, 'DROP COLUMN');
     const sql = buildAlterDropColumnSql(table, column, fields);
     if (!samePreviewSql(form.sql_preview, sql)) {
-      return renderDropColumnPreview(res, connection, table, column);
+      return renderDropColumnPreview(req, res, connection, table, column);
     }
     const results = await runSql(connection, sql);
-    if (collectMessages(results).length) return renderWriteResult(res, connection, table, 'Drop column result', results);
-    return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+    if (collectMessages(results).length) {
+      return renderWriteResult(req, res, connection, table, 'Drop column result', results);
+    }
+    return browseSuccess(req, res, connection, table, 'Column dropped');
   } catch (error) {
-    return renderTableActionError(res, connection, table, 'Drop column failed', error.message);
+    return renderTableActionError(req, res, connection, table, 'Drop column failed', error.message);
   }
 }
 
-async function renderModifyColumnPreview(res, connection, table, column) {
+async function renderModifyColumnPreview(req, res, connection, table, column) {
   try {
     const { fields } = await loadTableContext(connection, table, 'MODIFY COLUMN');
     const sql = buildAlterModifyBigintSql(table, column, fields);
     return renderColumnSqlPreview(
+      req,
       res,
       connection,
       table,
@@ -434,7 +625,7 @@ async function renderModifyColumnPreview(res, connection, table, column) {
       'Manticore only supports int to bigint widening.'
     );
   } catch (error) {
-    return renderTableActionError(res, connection, table, 'Modify column failed', error.message);
+    return renderTableActionError(req, res, connection, table, 'Modify column failed', error.message);
   }
 }
 
@@ -444,18 +635,20 @@ async function handleModifyColumn(req, res, connection, table, column) {
     const { fields } = await loadTableContext(connection, table, 'MODIFY COLUMN');
     const sql = buildAlterModifyBigintSql(table, column, fields);
     if (!samePreviewSql(form.sql_preview, sql)) {
-      return renderModifyColumnPreview(res, connection, table, column);
+      return renderModifyColumnPreview(req, res, connection, table, column);
     }
     const results = await runSql(connection, sql);
-    if (collectMessages(results).length) return renderWriteResult(res, connection, table, 'Modify column result', results);
-    return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+    if (collectMessages(results).length) {
+      return renderWriteResult(req, res, connection, table, 'Modify column result', results);
+    }
+    return browseSuccess(req, res, connection, table, 'Column widened to bigint');
   } catch (error) {
-    return renderTableActionError(res, connection, table, 'Modify column failed', error.message);
+    return renderTableActionError(req, res, connection, table, 'Modify column failed', error.message);
   }
 }
 
-function renderColumnSqlPreview(res, connection, table, title, sql, action, hidden, destructive, message = '') {
-  return sendHtml(res, 200, layout({
+function renderColumnSqlPreview(req, res, connection, table, title, sql, action, hidden, destructive, message = '') {
+  return respond(req, res, 200, {
     title,
     body: renderSqlPreviewForm({
       title,
@@ -467,24 +660,24 @@ function renderColumnSqlPreview(res, connection, table, title, sql, action, hidd
       message,
       backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
     })
-  }));
+  });
 }
 
-function renderTableActionError(res, connection, table, title, message) {
-  return sendHtml(res, 400, layout({
+function renderTableActionError(req, res, connection, table, title, message) {
+  return respond(req, res, 400, {
     title,
     body: renderOperationPage({
       title,
       message,
       backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
     })
-  }));
+  });
 }
 
-async function renderInsertForm(res, connection, table, values = {}, error = '') {
+async function renderInsertForm(req, res, connection, table, values = {}, error = '') {
   try {
     const { fields } = await loadTableContext(connection, table, 'Insert row');
-    return sendHtml(res, error ? 400 : 200, renderRowEditPage({
+    return respond(req, res, error ? 400 : 200, renderRowEditPage({
       connection,
       table,
       fields,
@@ -493,18 +686,18 @@ async function renderInsertForm(res, connection, table, values = {}, error = '')
       error
     }));
   } catch (loadError) {
-    return renderTableActionError(res, connection, table, 'Insert row unavailable', loadError.message);
+    return renderTableActionError(req, res, connection, table, 'Insert row unavailable', loadError.message);
   }
 }
 
-async function renderEditForm(res, connection, table, rowId, error = '') {
+async function renderEditForm(req, res, connection, table, rowId, error = '') {
   try {
     const { fields, schemaData } = await loadTableContext(connection, table, 'Edit row');
     const rowResults = await selectRowById(connection, table, rowId);
     const row = rowResults[0]?.data?.[0] || { id: rowId };
     const messages = [...collectMessages(schemaData.results), ...collectMessages(rowResults)];
     const messageError = messages.map((message) => message.message).join('\n');
-    return sendHtml(res, hasResultErrors(schemaData.results) || hasResultErrors(rowResults) ? 400 : 200, renderRowEditPage({
+    return respond(req, res, hasResultErrors(schemaData.results) || hasResultErrors(rowResults) ? 400 : 200, renderRowEditPage({
       connection,
       table,
       fields,
@@ -513,7 +706,7 @@ async function renderEditForm(res, connection, table, rowId, error = '') {
       error: error || messageError || (!rowResults[0]?.data?.[0] ? 'Row not found' : '')
     }));
   } catch (loadError) {
-    return renderTableActionError(res, connection, table, 'Edit row unavailable', loadError.message);
+    return renderTableActionError(req, res, connection, table, 'Edit row unavailable', loadError.message);
   }
 }
 
@@ -535,11 +728,11 @@ async function handleInsertRow(req, res, connection, table) {
     const payload = await insertDocument(connection, table, fields, values);
     const messages = collectJsonMessages(payload);
     if (messages.length) {
-      return renderJsonWriteResult(res, connection, table, 'Insert result', messages);
+      return renderJsonWriteResult(req, res, connection, table, 'Insert result', messages);
     }
-    return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+    return browseSuccess(req, res, connection, table, 'Row inserted');
   } catch (error) {
-    return renderInsertForm(res, connection, table, form, error.message);
+    return renderInsertForm(req, res, connection, table, form, error.message);
   }
 }
 
@@ -551,19 +744,19 @@ async function handleEditRow(req, res, connection, table, rowId) {
     const payload = await replaceDocument(connection, table, rowId, fields, values);
     const messages = collectJsonMessages(payload);
     if (messages.length) {
-      return renderJsonWriteResult(res, connection, table, 'Edit result', messages);
+      return renderJsonWriteResult(req, res, connection, table, 'Edit result', messages);
     }
-    return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+    return browseSuccess(req, res, connection, table, 'Row saved');
   } catch (error) {
-    return renderEditForm(res, connection, table, rowId, error.message);
+    return renderEditForm(req, res, connection, table, rowId, error.message);
   }
 }
 
-async function renderDeleteRowPreview(res, connection, table, rowId) {
+async function renderDeleteRowPreview(req, res, connection, table, rowId) {
   try {
     await loadTableContext(connection, table, 'Delete row');
     const sql = buildDeleteSql(table, rowId);
-    return sendHtml(res, 200, layout({
+    return respond(req, res, 200, {
       title: 'Delete row',
       body: renderSqlPreviewForm({
         title: 'Delete row',
@@ -573,9 +766,9 @@ async function renderDeleteRowPreview(res, connection, table, rowId) {
         destructive: true,
         backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
       })
-    }));
+    });
   } catch (error) {
-    return renderTableActionError(res, connection, table, 'Delete row unavailable', error.message);
+    return renderTableActionError(req, res, connection, table, 'Delete row unavailable', error.message);
   }
 }
 
@@ -585,46 +778,46 @@ async function handleDeleteRow(req, res, connection, table, rowId) {
     await loadTableContext(connection, table, 'Delete row');
     const sql = buildDeleteSql(table, rowId);
     if (!samePreviewSql(form.sql_preview, sql)) {
-      return renderDeleteRowPreview(res, connection, table, rowId);
+      return renderDeleteRowPreview(req, res, connection, table, rowId);
     }
     const results = await runSql(connection, sql);
     if (collectMessages(results).length) {
-      return renderWriteResult(res, connection, table, 'Delete result', results);
+      return renderWriteResult(req, res, connection, table, 'Delete result', results);
     }
-    return redirect(res, `/connections/${connection.id}/tables/${encodeURIComponent(table)}`);
+    return browseSuccess(req, res, connection, table, 'Row deleted');
   } catch (error) {
-    return sendHtml(res, 400, layout({
+    return respond(req, res, 400, {
       title: 'Delete failed',
       body: renderOperationPage({
         title: 'Delete failed',
         message: error.message,
         backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
       })
-    }));
+    });
   }
 }
 
-function renderWriteResult(res, connection, table, title, results, backHref = '') {
+function renderWriteResult(req, res, connection, table, title, results, backHref = '') {
   const messages = collectMessages(results);
-  return sendHtml(res, hasResultErrors(results) ? 400 : 200, layout({
+  return respond(req, res, hasResultErrors(results) ? 400 : 200, {
     title,
     body: renderOperationPage({
       title,
       messages,
       backHref: backHref || `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
     })
-  }));
+  });
 }
 
-function renderJsonWriteResult(res, connection, table, title, messages) {
-  return sendHtml(res, messages.some((message) => message.type === 'error') ? 400 : 200, layout({
+function renderJsonWriteResult(req, res, connection, table, title, messages) {
+  return respond(req, res, messages.some((message) => message.type === 'error') ? 400 : 200, {
     title,
     body: renderOperationPage({
       title,
       messages,
       backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
     })
-  }));
+  });
 }
 
 function samePreviewSql(submitted, expected) {
@@ -633,14 +826,4 @@ function samePreviewSql(submitted, expected) {
 
 function normalizePreviewSql(value) {
   return String(value ?? '').replace(/\r\n?/g, '\n');
-}
-
-function escapeForError(value) {
-  return String(value || '').replace(/[&<>"']/g, (char) => ({
-    '&': '&amp;',
-    '<': '&lt;',
-    '>': '&gt;',
-    '"': '&quot;',
-    "'": '&#39;'
-  })[char]);
 }

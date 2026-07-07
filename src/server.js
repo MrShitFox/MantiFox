@@ -7,7 +7,7 @@ import { config } from './config.js';
 import './db.js';
 import { handleApi } from './routes/api.js';
 import { handleLogin, handlePages } from './routes/pages.js';
-import { redirect, send, sendJson } from './router.js';
+import { isHtmx, redirect, send, sendJson } from './router.js';
 
 const publicRoot = fileURLToPath(new URL('../public/', import.meta.url));
 
@@ -35,6 +35,14 @@ const server = http.createServer(async (req, res) => {
       if (url.pathname.startsWith('/api/')) {
         return sendJson(res, 401, { error: 'Authentication required' });
       }
+      // An expired session mid-htmx-request must not swap the login page into
+      // a panel fragment; HX-Redirect makes htmx do a full browser navigation.
+      if (isHtmx(req)) {
+        return send(res, 401, {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'HX-Redirect': '/login'
+        }, 'Authentication required');
+      }
       return redirect(res, '/login');
     }
 
@@ -58,7 +66,7 @@ server.listen(config.port, () => {
 });
 
 function isStaticPath(pathname) {
-  return pathname === '/app.js' || pathname === '/styles.css' || pathname.startsWith('/public/');
+  return pathname === '/app.js' || pathname === '/styles.css' || pathname === '/htmx.min.js' || pathname.startsWith('/public/');
 }
 
 async function serveStatic(res, pathname) {

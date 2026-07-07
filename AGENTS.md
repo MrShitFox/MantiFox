@@ -45,6 +45,15 @@ over pulling a library. Respect this hard.
   global `fetch`, `node:fs`, `node:url`).
 - Talk to Manticore over its **HTTP JSON API** using global `fetch` only.
 - Keep the whole app with **zero build step** (plain JavaScript, ESM).
+- Frontend interactivity: **htmx is whitelisted** as the ONE vendored no-build
+  frontend library — `public/htmx.min.js`, a pinned version committed to the
+  repo (currently **2.0.10**), never a CDN `<script src>`; the tool must work
+  offline. htmx is a hypermedia helper (HTML fragments over HTTP), NOT a SPA
+  framework and NOT a bundler, so it does not violate the bans below. Alpine.js
+  is NOT used — the remaining client JS (visibility toggles, the column
+  builder) is small delegated vanilla JS in `public/app.js`; introduce Alpine
+  only if it would clearly shrink that code, and then only as a second
+  vendored, pinned, single file.
 
 **DO NOT (unless explicitly asked):**
 - Do NOT add a MySQL/MariaDB driver (`mysql2`, `mysql`, etc.). Manticore's HTTP
@@ -53,7 +62,8 @@ over pulling a library. Respect this hard.
   `node:http`. (Express is the *only* one that may be considered if routing
   becomes genuinely unwieldy — ask first.)
 - Do NOT add a frontend SPA framework (React/Vue/Svelte/Angular) or any bundler
-  (webpack/vite/esbuild/rollup). Use server-rendered HTML + one vanilla JS file.
+  (webpack/vite/esbuild/rollup). Use server-rendered HTML + vendored htmx (see
+  DO above) + one vanilla JS file.
 - Do NOT add a UI component library or its runtime — no MUI / `@mui/material`
   (that is React), no `@material/web` / Material Web Components, no Bootstrap,
   no Shoelace. The Material Design 3 look is implemented by hand as CSS tokens +
@@ -91,9 +101,12 @@ instead of adding it silently.
 - **Auth:** `node:crypto` — `scryptSync` for password hashing, `randomBytes` for
   salts/session ids, `createHmac` for signing the session cookie,
   `timingSafeEqual` for comparisons.
-- **Frontend:** server-rendered HTML built with template literals + one vanilla
-  `public/app.js`. No framework, no bundler. Plain CSS in `public/styles.css`
-  (optionally one classless CSS file via `<link>`).
+- **Frontend:** server-rendered HTML built with template literals + **htmx**
+  (vendored `public/htmx.min.js`, pinned 2.0.10 — see §2) for no-reload
+  navigation and CRUD, + one vanilla `public/app.js` that binds ONLY via event
+  delegation (so behaviour survives fragment swaps). No framework, no bundler.
+  Plain CSS in `public/styles.css`. The htmx request/response conventions are
+  in §7 — follow them for every new route.
 
 ---
 
@@ -498,29 +511,31 @@ switching to `"..."`. Confirmed against the manual and the live node
 
 ## 5. Development / test node
 
-A test Manticore node is available on the LAN:
+A test Manticore node is available locally (moved from the old LAN address
+`192.168.1.75:9318`):
 
-- **HTTP API base:** `http://192.168.1.75:9318`  ← the tool connects here
-- **SQL (MySQL) port:** `9316`  ← intentionally unused by this tool
+- **HTTP API base:** `http://127.0.0.1:9308`  ← the tool connects here
+- The MySQL/SQL port is intentionally unused by this tool.
 
-Smoke test the agent/owner can run from the same network:
+Smoke test the agent/owner can run:
 
 ```bash
-curl -s "http://192.168.1.75:9318/sql?mode=raw" -d "SHOW TABLES"
-curl -s "http://192.168.1.75:9318/sql?mode=raw" -d "SELECT 1"
+curl -s "http://127.0.0.1:9308/sql?mode=raw" -d "SHOW TABLES"
+curl -s "http://127.0.0.1:9308/sql?mode=raw" -d "SELECT 1"
 ```
 
 Seed some data to test browsing/CRUD (RT table + rows):
 
 ```bash
-curl -s "http://192.168.1.75:9318/sql?mode=raw" -d "DROP TABLE IF EXISTS demo"
-curl -s "http://192.168.1.75:9318/sql?mode=raw" -d "CREATE TABLE demo(title text, price float)"
-curl -s "http://192.168.1.75:9318/sql?mode=raw" -d "INSERT INTO demo(id,title,price) VALUES(1,'first',9.9),(2,'second',19.5)"
-curl -s "http://192.168.1.75:9318/sql?mode=raw" -d "SELECT * FROM demo"
+curl -s "http://127.0.0.1:9308/sql?mode=raw" -d "DROP TABLE IF EXISTS demo"
+curl -s "http://127.0.0.1:9308/sql?mode=raw" -d "CREATE TABLE demo(title text, price float)"
+curl -s "http://127.0.0.1:9308/sql?mode=raw" -d "INSERT INTO demo(id,title,price) VALUES(1,'first',9.9),(2,'second',19.5)"
+curl -s "http://127.0.0.1:9308/sql?mode=raw" -d "SELECT * FROM demo"
 ```
 
-The default HTTP port is normally 9308; this node uses 9318, which is exactly
-why connections must store an explicit host + port.
+This node happens to sit on the default HTTP port (9308), but Manticore ports
+are fully configurable — connections must still store an explicit host + port,
+never assume a default.
 
 ---
 
@@ -552,7 +567,8 @@ why connections must store an explicit host + port.
       console.js          # SQL console page
       components.js       # reusable HTML snippets (table, form, alert)
   public/
-    app.js                # vanilla client JS: run query, render result tables, inline edit
+    htmx.min.js           # vendored htmx (pinned version) — the only frontend lib
+    app.js                # vanilla client JS: delegated widgets + htmx wiring (toasts, focus)
     styles.css            # plain CSS
   data/
     app.sqlite            # created at runtime (gitignored)
@@ -592,6 +608,56 @@ Keep it flatter if the app stays small — do not over-engineer folders.
   with a clear message if a required env var is missing.
 - **Errors:** API handlers return JSON `{ "error": "..." }` with a correct HTTP
   status. Never swallow Manticore errors — pass `error`/`warning` through.
+- **htmx conventions (the interaction layer — follow for every page route).**
+  The UI updates by fragment swaps; full page loads happen only on direct
+  entry / refresh / history-restore and at the session boundary (login/logout).
+  - *Fragment vs full page:* every page route serves BOTH from the same URL.
+    `isHtmx(req)` in `router.js` (header `HX-Request: true` AND NOT
+    `HX-History-Restore-Request: true`) → send the `#main` fragment via
+    `fragment()` in `views/layout.js` (a `<title>` tag + body + out-of-band
+    toasts); otherwise the full `layout()` document. History restores and
+    deep links therefore always receive a complete page. Page responses send
+    `Vary: HX-Request, HX-Target` and stay `no-store`.
+  - *Navigation:* `<main id="main">` carries `hx-boost="true"`,
+    `hx-target="#main"`, `hx-swap="innerHTML show:window:top"` and
+    `hx-sync="this:replace"`, so every plain link/form inside it swaps `#main`
+    (links push their URL; a newer click aborts the older request). Controls
+    that swap something narrower declare their own `hx-*` attributes and win
+    over boost: browse search/sort/pagination target `#data-panel`
+    (`hx-push-url="true"`), the SQL console targets `#console-results`, the
+    connection Test button targets its output element. The browse route
+    branches on the `HX-Target` header to return just the data panel.
+  - *POST success:* an htmx request gets the DESTINATION page as a fragment
+    plus an `HX-Push-Url` header and a success toast ("Table created",
+    "Row deleted", …); the non-htmx path keeps the 303 PRG redirect. Never
+    answer an htmx form POST with a 3xx.
+  - *Auth:* an unauthenticated htmx request gets `401` + `HX-Redirect: /login`
+    (full browser navigation) — never the login form as a fragment inside a
+    panel. Non-htmx keeps the 303 redirect.
+  - *Errors — one shared zone:* `#toast-region` (declared once in the layout)
+    is the single surface for errors/warnings/success feedback, fed by
+    out-of-band swaps (`hx-swap-oob="afterbegin:#toast-region"`, placed at the
+    top level of the fragment). Two error shapes: (1) validation failures
+    re-render the SAME form fragment with the inline alert, status 400;
+    (2) non-form failures (unreachable node, 404, catch-all 500) send a
+    toast-only body + `HX-Reswap: none` + `HX-Push-Url: false` so the current
+    content, input and URL survive — never swap a raw error over the page.
+    The client's `htmx:beforeSwap` hook allows swaps for status >= 400, so
+    every htmx error body must be meaningful HTML.
+  - *JS re-initialisation:* `public/app.js` binds ONLY via document-level
+    event delegation, plus an idempotent `enhance(root)` for initial widget
+    state that runs on DOMContentLoaded, `htmx:afterSwap` and
+    `htmx:historyRestore`. Never wire a widget on DOMContentLoaded alone —
+    it dies on the first fragment swap.
+  - *Feedback on every request:* busy states come from the `.htmx-request`
+    CSS rules (button spinner, link dimming) and `.htmx-indicator` elements;
+    double submits are blocked by `hx-disabled-elt="find
+    button[type='submit']"` (inherited from `#main`) plus
+    `hx-sync="this:drop"` on forms.
+  - *Destructive flow:* keep the SQL-preview + confirm pages (served as
+    fragments into `#main`) with the server-side `sql_preview` echo check and
+    the `data-confirm` → `window.confirm` step. Do NOT downgrade any of it to
+    a bare `hx-confirm`.
 
 ---
 
@@ -665,9 +731,10 @@ Ship a minimal `README.md` with install/run/env instructions.
 - Runs with `npm start` and a couple of env vars; no build step.
 - `package.json` has no runtime deps beyond `better-sqlite3`.
 - Auth works; unauthenticated access is blocked everywhere it should be.
-- Against the test node (`http://192.168.1.75:9318`): can add the connection,
-  create a table via the GUI form, browse a table, edit a row, drop a table, and
-  run SQL — all through the browser.
+- Against the test node (`http://127.0.0.1:9308`, section 5): can add the
+  connection, create a table via the GUI form, browse a table, edit a row, drop
+  a table, and run SQL — all through the browser, with navigation and CRUD
+  happening as htmx fragment swaps (no full page reloads in normal flows).
 - Manticore `error`/`warning` and app errors are shown clearly, never swallowed.
 
 ---

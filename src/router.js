@@ -47,11 +47,26 @@ export function sendJson(res, statusCode, payload) {
   }, JSON.stringify(payload));
 }
 
-export function sendHtml(res, statusCode, html) {
+export function sendHtml(res, statusCode, html, extraHeaders = {}) {
   send(res, statusCode, {
     'Content-Type': 'text/html; charset=utf-8',
-    'Cache-Control': 'no-store'
+    'Cache-Control': 'no-store',
+    ...extraHeaders
   }, html);
+}
+
+// An htmx request that wants a fragment. History restores (back/forward past
+// the htmx cache) also send HX-Request but expect a FULL page, so they must
+// not be treated as fragment requests.
+export function isHtmx(req) {
+  return req.headers['hx-request'] === 'true'
+    && req.headers['hx-history-restore-request'] !== 'true';
+}
+
+// The id of the element htmx will swap (without '#'), from the HX-Target
+// header. Lets one route serve different fragment sizes.
+export function htmxTarget(req) {
+  return String(req.headers['hx-target'] || '');
 }
 
 export function redirect(res, location, statusCode = 303, headers = {}) {
