@@ -1567,6 +1567,100 @@ html:has(.htmx-request) {
   overflow-wrap: anywhere;
 }
 
+/* --- Developer reproduce panel ----------------------------------------- */
+
+.reproduce-panel {
+  padding: 0.9rem 1.2rem;
+}
+
+.reproduce-details summary {
+  flex-wrap: wrap;
+}
+
+.reproduce-details summary small {
+  font-weight: 400;
+}
+
+.reproduce-body {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 0.8rem;
+  animation: rise var(--speed-slow) var(--ease-out) both;
+}
+
+.request-meta {
+  display: flex;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+  margin: 0;
+}
+
+.request-meta div {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.22rem 0.55rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.025);
+}
+
+.request-meta dt {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.request-meta dd {
+  margin: 0;
+}
+
+.reproduce-actions {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.reproduce-block {
+  display: grid;
+  gap: 0.45rem;
+}
+
+.reproduce-block h3 {
+  margin: 0;
+}
+
+.reproduce-code {
+  max-height: 18rem;
+  margin: 0;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  background: #0e121a;
+  overflow: auto;
+  font-size: 0.85rem;
+  line-height: 1.45;
+  white-space: pre;
+}
+
+.compact-copy {
+  min-height: 2rem;
+  padding: 0.24rem 0.6rem;
+  border-radius: 0.55rem;
+  font-size: 0.86rem;
+}
+
+.reproduce-count {
+  padding: 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  background: rgba(255, 255, 255, 0.018);
+}
+
+.reproduce-count summary small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
 /* --- Query insight ------------------------------------------------------ */
 
 .insight-panel {

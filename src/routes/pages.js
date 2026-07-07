@@ -4,6 +4,7 @@ import {
   buildAlterDropColumnSql,
   buildAlterModifyBigintSql,
   buildDeleteSql,
+  connectionBaseUrl,
   buildCreateTableSql,
   buildDropTableSql,
   buildMatchExpression,
@@ -68,6 +69,7 @@ import {
   renderAutocompleteDatalist,
   renderExplainBody,
   renderFilterBlock,
+  renderSearchReproducePanel,
   renderRowDetail,
   renderSearchPage,
   renderSearchResults,
@@ -232,7 +234,13 @@ async function handleConnectionPages(req, res, url, parts) {
 
   if (parts.length === 2 && parts[1] === 'console') {
     if (req.method === 'GET') {
-      return respond(req, res, 200, renderConsolePage({ connection }));
+      const prefill = url.searchParams.has('sql')
+        ? String(url.searchParams.get('sql') || '').slice(0, 50000)
+        : undefined;
+      return respond(req, res, 200, renderConsolePage({
+        connection,
+        ...(prefill !== undefined ? { sql: prefill } : {})
+      }));
     }
     if (req.method === 'POST') {
       return handleConsoleRun(req, res, connection);
@@ -506,6 +514,37 @@ function parseSearchState(searchParams, profile) {
   };
 }
 
+function shellSingleQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`;
+}
+
+function buildSqlCurl(connection, sql) {
+  const url = `${connectionBaseUrl(connection)}/sql?mode=raw`;
+  return [
+    `curl -sS -X POST ${shellSingleQuote(url)} \\`,
+    `  -H ${shellSingleQuote('Content-Type: text/plain; charset=utf-8')} \\`,
+    `  --data-binary ${shellSingleQuote(sql)}`
+  ].join('\n');
+}
+
+function buildSearchReproduce(connection, { sql, countSql = '', label = 'Search request' }) {
+  if (!sql) return null;
+  const authType = String(connection.auth_type || 'none');
+  return {
+    label,
+    method: 'POST',
+    path: '/sql?mode=raw',
+    contentType: 'text/plain; charset=utf-8',
+    url: `${connectionBaseUrl(connection)}/sql?mode=raw`,
+    sql: String(sql),
+    countSql: countSql && countSql !== sql ? String(countSql) : '',
+    curl: buildSqlCurl(connection, sql),
+    authNote: authType !== 'none'
+      ? `This connection uses ${authType} auth. MantiFox forwarded the Authorization header, but the secret value is intentionally not rendered here.`
+      : ''
+  };
+}
+
 // Runs the search and shapes everything the results block needs. User-input
 // problems (bad filter value, fuzzy misuse, MATCH syntax in advanced mode)
 // come back as { error } so the form survives; transport failures throw.
@@ -551,7 +590,13 @@ async function executeSearch(connection, table, profile, state, caps) {
 
     const countSets = await runSql(connection, countSql);
     if (hasResultErrors(countSets)) {
-      return { error: collectMessages(countSets).map((message) => message.message).join('\n') };
+      return {
+        error: collectMessages(countSets).map((message) => message.message).join('\n'),
+        reproduce: buildSearchReproduce(connection, {
+          sql: countSql,
+          label: 'Count request'
+        })
+      };
     }
     const countRow = countSets[0]?.data?.[0] || {};
     const total = Number(countRow.count ?? countRow['count(*)'] ?? Object.values(countRow)[0] ?? 0) || 0;
@@ -684,12 +729,33 @@ async function executeSearch(connection, table, profile, state, caps) {
       }
     }
 
-    return { hits, total, messages, insight, facet, didYouMean };
+    return {
+      hits,
+      total,
+      messages,
+      insight,
+      facet,
+      didYouMean,
+      reproduce: buildSearchReproduce(connection, {
+        sql: searchSql,
+        countSql,
+        label: 'Search request'
+      })
+    };
   } catch (error) {
     // Bad input and query-level Manticore failures (it answers even syntax
     // errors with HTTP 500) belong inline in the results panel, with the form
     // intact; only transport problems bubble up as unreachable-node errors.
-    if (error.statusCode === 400 || error.manticoreStatus) return { error: error.message };
+    if (error.statusCode === 400 || error.manticoreStatus) {
+      return {
+        error: error.message,
+        reproduce: buildSearchReproduce(connection, {
+          sql: searchSql || countSql,
+          countSql,
+          label: searchSql ? 'Search request' : 'Count request'
+        })
+      };
+    }
     throw error;
   }
 }
@@ -717,6 +783,7 @@ async function handleSearch(req, res, connection, table, url) {
 
     if (isHtmx(req) && htmxTarget(req) === 'search-results') {
       const body = renderFilterBlock({ basePath: searchBasePath(connection, table), profile, state, oob: true })
+        + renderSearchReproducePanel({ connection, results, oob: true })
         + renderSearchResults({ connection, table, profile, state, results });
       return sendHtml(res, status, body, pageHeaders);
     }

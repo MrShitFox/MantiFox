@@ -94,6 +94,7 @@ export function renderSearchPage({ connection, table, profile, state, results })
     <section class="panel search-panel">
       ${renderSearchForm({ basePath, profile, state })}
     </section>
+    ${renderSearchReproducePanel({ connection, results })}
     ${renderSearchResults({ connection, table, profile, state, results })}`
   };
 }
@@ -347,6 +348,92 @@ export function renderSearchResults({ connection, table, profile, state, results
   </div>`;
 }
 
+export function renderSearchReproducePanel({ connection, results, oob = false }) {
+  const attrs = `id="search-reproduce-panel" class="panel reproduce-panel"${oob ? ' hx-swap-oob="outerHTML"' : ''}`;
+  const reproduce = results?.reproduce;
+  if (!reproduce) {
+    return `<section ${attrs}>
+      <details class="reproduce-details">
+        <summary>Developer / reproduce this query <small class="muted">no request sent</small></summary>
+        <p class="muted">No Manticore search request was sent for the current state.</p>
+      </details>
+    </section>`;
+  }
+
+  const sqlId = 'search-reproduce-sql';
+  const curlId = 'search-reproduce-curl';
+  const countId = 'search-reproduce-count';
+  const consoleHref = `/connections/${connection.id}/console?sql=${encodeURIComponent(reproduce.sql)}`;
+  const meta = [
+    ['Method', reproduce.method],
+    ['Path', reproduce.path],
+    ['Content-Type', reproduce.contentType]
+  ];
+
+  return `<section ${attrs}>
+    <details class="reproduce-details">
+      <summary>Developer / reproduce this query
+        <small class="muted">${escapeHtml(reproduce.method)} ${escapeHtml(reproduce.path)}</small>
+      </summary>
+      <div class="reproduce-body">
+        <dl class="request-meta">
+          ${meta.map(([key, value]) => `<div><dt>${escapeHtml(key)}</dt><dd><code>${escapeHtml(value)}</code></dd></div>`).join('')}
+        </dl>
+        ${reproduce.authNote ? renderAlert(reproduce.authNote, 'warning') : ''}
+        ${renderReproduceNotes(reproduce)}
+        <div class="reproduce-actions">
+          ${button({ label: 'Copy SQL', variant: 'secondary compact-copy', attrs: { 'data-copy-source': sqlId } })}
+          ${button({ label: 'Open in SQL console', href: consoleHref, variant: 'secondary' })}
+        </div>
+        ${renderReproduceBlock({
+          id: sqlId,
+          title: reproduce.label || 'Search request',
+          subtitle: 'SQL console body',
+          value: reproduce.sql
+        })}
+        ${reproduce.countSql ? `<details class="reproduce-count">
+          <summary>Pagination count SQL <small class="muted">used for total rows</small></summary>
+          ${renderReproduceBlock({
+            id: countId,
+            title: 'Count request',
+            subtitle: 'SQL body',
+            value: reproduce.countSql
+          })}
+        </details>` : ''}
+        ${renderReproduceBlock({
+          id: curlId,
+          title: 'curl',
+          subtitle: reproduce.url,
+          value: reproduce.curl,
+          copyLabel: 'Copy curl'
+        })}
+      </div>
+    </details>
+  </section>`;
+}
+
+function renderReproduceNotes(reproduce) {
+  const sql = `${reproduce?.sql || ''}\n${reproduce?.countSql || ''}`;
+  if (!sql.includes(highlightBefore) && !sql.includes(highlightAfter)) return '';
+  return renderAlert(
+    'U+E000 and U+E001 in HIGHLIGHT() are internal before/after_match markers. MantiFox copies them exactly, escapes result text, then renders only those markers as <mark> highlights.',
+    'warning'
+  );
+}
+
+function renderReproduceBlock({ id, title, subtitle = '', value, copyLabel = 'Copy' }) {
+  return `<div class="reproduce-block">
+    <header class="result-heading">
+      <div>
+        <h3>${escapeHtml(title)}</h3>
+        ${subtitle ? `<small class="muted">${escapeHtml(subtitle)}</small>` : ''}
+      </div>
+      ${button({ label: copyLabel, variant: 'secondary compact-copy', attrs: { 'data-copy-source': id } })}
+    </header>
+    <pre id="${escapeAttr(id)}" class="reproduce-code"><code>${escapeHtml(value)}</code></pre>
+  </div>`;
+}
+
 function resultsRangeLabel(total, page, perPage, count) {
   if (!count) return `0 of ${total}`;
   const offset = (page - 1) * perPage;
@@ -390,7 +477,7 @@ function renderInsight({ basePath, state, insight }) {
             <td>${escapeHtml(row.hits)}</td>
           </tr>`).join('')}</tbody>
         </table>` : '<p class="muted">No per-keyword stats for this query.</p>'}
-        <details class="explain-block" hx-get="${escapeAttr(explainUrl)}" hx-trigger="toggle once from:this" hx-target="find .explain-body" hx-swap="innerHTML">
+        <details class="explain-block" data-explain-url="${escapeAttr(explainUrl)}">
           <summary>Explain query <small>how Manticore parsed it</small></summary>
           <div class="explain-body"><span class="muted">Loading&hellip;</span></div>
         </details>

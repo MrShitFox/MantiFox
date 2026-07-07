@@ -186,6 +186,12 @@
       return;
     }
 
+    var copyButton = target.closest('[data-copy-source]');
+    if (copyButton) {
+      copyFromSource(copyButton);
+      return;
+    }
+
     // Search hit detail cards close client-side — the fragment was already
     // fetched, clearing the container needs no round trip.
     var detailClose = target.closest('[data-detail-close]');
@@ -194,6 +200,58 @@
       if (detail) detail.replaceChildren();
     }
   });
+
+  // <details> "toggle" is not a reliable htmx trigger across swapped
+  // fragments, and it does not bubble. Capture it once at document level and
+  // lazy-load EXPLAIN from the live element whenever the panel is opened.
+  document.addEventListener('toggle', function (event) {
+    var details = event.target instanceof Element ? event.target : null;
+    if (!details || !details.matches('details.explain-block')) return;
+    loadExplain(details);
+  }, true);
+
+  function loadExplain(details) {
+    if (!details.open) return;
+    if (details.dataset.explainState === 'loading' || details.dataset.explainState === 'loaded') return;
+    var url = details.getAttribute('data-explain-url');
+    var body = details.querySelector('.explain-body');
+    if (!url || !body) return;
+
+    details.dataset.explainState = 'loading';
+    body.innerHTML = '<span class="muted"><span class="spinner"></span>Loading&hellip;</span>';
+    fetch(url, {
+      method: 'GET',
+      credentials: 'same-origin',
+      headers: { 'HX-Request': 'true' }
+    }).then(function (response) {
+      var redirect = response.headers.get('HX-Redirect');
+      if (redirect) {
+        window.location.href = redirect;
+        return '';
+      }
+      return response.text().then(function (html) {
+        if (!response.ok && !html) throw new Error(response.statusText || 'Could not load EXPLAIN');
+        return html;
+      });
+    }).then(function (html) {
+      if (!html) return;
+      body.innerHTML = html;
+      details.dataset.explainState = 'loaded';
+      processHtmx(body);
+    }).catch(function (error) {
+      delete details.dataset.explainState;
+      renderInlineError(body, error && error.message ? error.message : 'Could not load EXPLAIN');
+    });
+  }
+
+  function renderInlineError(container, message) {
+    if (!container) return;
+    var alert = document.createElement('div');
+    alert.className = 'alert alert-error';
+    alert.setAttribute('role', 'alert');
+    alert.textContent = message;
+    container.replaceChildren(alert);
+  }
 
   /* --- capture-phase submit guard: JSON validation + destructive confirm.
          preventDefault() + stopPropagation() cancels the submit before both
@@ -252,6 +310,11 @@
     // outerHTML swaps detach the original target; re-resolve by id.
     var live = target.isConnected ? target : (target.id ? document.getElementById(target.id) : null);
     if (live) enhance(live);
+    if (live && (live.id === 'search-results' || live.id === 'main')) {
+      processHtmx(live);
+      var reproducePanel = document.getElementById('search-reproduce-panel');
+      if (reproducePanel) processHtmx(reproducePanel);
+    }
 
     if (target.id === 'data-panel') {
       restoreFocus(live);
@@ -269,6 +332,12 @@
       focusMemo = null;
     }
   });
+
+  function processHtmx(root) {
+    if (window.htmx && typeof window.htmx.process === 'function') {
+      window.htmx.process(root);
+    }
+  }
 
   document.addEventListener('htmx:sendError', function () {
     showToast('Could not reach MantiFox. Check the network and retry.', 'error');
@@ -383,6 +452,43 @@
     close.textContent = '×';
     toast.append(text, close);
     region.prepend(toast);
+  }
+
+  function copyFromSource(button) {
+    var id = button.getAttribute('data-copy-source');
+    var source = id ? document.getElementById(id) : null;
+    if (!source) return;
+    var text = 'value' in source ? source.value : source.textContent;
+    text = text || '';
+    var done = function () {
+      showToast('Copied', 'success');
+    };
+    var fail = function () {
+      if (fallbackCopy(text)) done();
+      else showToast('Copy failed. Select the text and copy it manually.', 'error');
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      navigator.clipboard.writeText(text).then(done, fail);
+    } else {
+      fail();
+    }
+  }
+
+  function fallbackCopy(text) {
+    var textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.setAttribute('readonly', '');
+    textarea.style.position = 'fixed';
+    textarea.style.left = '-9999px';
+    document.body.append(textarea);
+    textarea.select();
+    try {
+      return document.execCommand('copy');
+    } catch (ignored) {
+      return false;
+    } finally {
+      textarea.remove();
+    }
   }
 
   /* ==================================================================== *
