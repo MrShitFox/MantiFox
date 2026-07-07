@@ -8,13 +8,16 @@ import {
   hasResultErrors,
   insertDocument,
   listTables,
+  maxBrowseWindow,
   ping,
   replaceDocument,
   requireRealtimeTable,
   runSql,
+  runSqlStatements,
   selectRowById,
   selectRows,
-  showTableStatus
+  showTableStatus,
+  splitSqlStatements
 } from '../manticore.js';
 import {
   createConnection,
@@ -82,11 +85,15 @@ async function handleConnectionsApi(req, res, url, parts) {
   if (parts[1] === 'sql' && parts.length === 2) {
     if (req.method !== 'POST') return methodNotAllowed(res);
     const body = await readJson(req);
-    if (!body.sql || !String(body.sql).trim()) {
+    // One statement per /sql?mode=raw request (§4.1): split scripts and run
+    // them sequentially, stopping after the first failed statement. `skipped`
+    // reports how many statements were abandoned because of that stop.
+    const statements = splitSqlStatements(body.sql);
+    if (!statements.length) {
       return sendJson(res, 400, { error: 'SQL is required' });
     }
-    const results = await runSql(connection, body.sql);
-    return sendJson(res, 200, { results, messages: collectMessages(results) });
+    const { results, skipped } = await runSqlStatements(connection, statements);
+    return sendJson(res, 200, { results, messages: collectMessages(results), skipped });
   }
 
   if (parts[1] === 'tables') {
@@ -134,7 +141,10 @@ async function handleRowsApi(req, res, url, connection, table, parts) {
   if (parts.length === 0) {
     if (req.method === 'GET') {
       const limit = clampInteger(url.searchParams.get('limit'), 25, 1, 200);
-      const offset = clampInteger(url.searchParams.get('offset'), 0, 0, 1000000000);
+      // Cap the window: selectRows sizes OPTION max_matches from offset+limit,
+      // and an uncapped offset let one request demand a ~1e9-slot result
+      // buffer from the node (§4.2). Past-the-cap requests get a clear 400.
+      const offset = clampInteger(url.searchParams.get('offset'), 0, 0, maxBrowseWindow);
       const search = url.searchParams.get('q') || '';
       const sort = url.searchParams.get('sort') || '';
       const dir = url.searchParams.get('dir') === 'desc' ? 'desc' : 'asc';

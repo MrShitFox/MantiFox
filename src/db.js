@@ -82,19 +82,38 @@ function parseConnectionHost(rawHost, rawScheme, rawPort) {
     throw new Error('Host must not include a path, query, or fragment');
   }
 
+  // Only a literal IPv6 address may still contain colons at this point
+  // (connectionBaseUrl brackets it later); anything else - e.g. "host:" or
+  // "host:port/extra" leftovers - would produce an unfetchable URL, so reject
+  // it now instead of at first use.
+  if (host.includes(':') && !host.startsWith('[')) {
+    try {
+      void new URL(`http://[${host}]/`);
+    } catch {
+      throw new Error('Host must be a hostname, IPv4 address, or IPv6 address');
+    }
+  }
+
   return { scheme, host, port: numericPort };
 }
 
 function normalizeAuth(input, existing) {
-  const authType = ['none', 'basic', 'bearer'].includes(input.auth_type)
-    ? input.auth_type
-    : 'none';
+  // A partial update (JSON PUT with e.g. only `name`) must not silently reset
+  // auth to 'none' and wipe stored credentials: fall back to the existing
+  // values for anything the request leaves out. The HTML form always submits
+  // auth_type/username, so its explicit values still win.
+  const authType = input.auth_type ?? existing?.auth_type ?? 'none';
+  if (!['none', 'basic', 'bearer'].includes(authType)) {
+    throw new Error('auth_type must be none, basic, or bearer');
+  }
 
   if (authType === 'basic') {
     const keepPassword = existing && existing.auth_type === 'basic' && !input.password;
+    const username = input.username
+      ?? (existing?.auth_type === 'basic' ? existing.username : '');
     return {
       auth_type: 'basic',
-      username: String(input.username || '').trim(),
+      username: String(username || '').trim(),
       password: keepPassword ? existing.password : String(input.password || ''),
       bearer_token: ''
     };

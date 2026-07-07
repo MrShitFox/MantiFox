@@ -209,6 +209,117 @@ export async function ping(connection) {
   return runSql(connection, 'SHOW VERSION');
 }
 
+// The /sql?mode=raw endpoint reliably accepts only ONE statement per request
+// (multi-statement input returns a P01 syntax error - verified against the
+// node), so console input has to be split and submitted statement by
+// statement. The scanner tracks '...' literals (backslash escapes), `...`
+// identifiers and /* */ comments so a ';' inside them never splits. Line
+// comments (-- with trailing whitespace, #) are dropped entirely: Manticore
+// rejects them outright (verified P02 errors), while block comments pass
+// through because the server accepts them and /*+ ... */ carries hints.
+export function splitSqlStatements(sql) {
+  const text = String(sql ?? '');
+  const statements = [];
+  let current = '';
+  let hasContent = false;
+  let i = 0;
+
+  const flush = () => {
+    const statement = current.trim();
+    if (hasContent && statement) statements.push(statement);
+    current = '';
+    hasContent = false;
+  };
+
+  while (i < text.length) {
+    const ch = text[i];
+
+    if (ch === "'" || ch === '`') {
+      hasContent = true;
+      current += ch;
+      i++;
+      while (i < text.length && text[i] !== ch) {
+        current += text[i];
+        if (ch === "'" && text[i] === '\\' && i + 1 < text.length) {
+          current += text[i + 1];
+          i++;
+        }
+        i++;
+      }
+      if (i < text.length) {
+        current += ch;
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === '/' && text[i + 1] === '*') {
+      current += '/*';
+      i += 2;
+      while (i < text.length && !(text[i] === '*' && text[i + 1] === '/')) {
+        current += text[i];
+        i++;
+      }
+      if (i < text.length) {
+        current += '*/';
+        i += 2;
+      }
+      continue;
+    }
+
+    // MySQL rule: `--` opens a comment only when followed by whitespace or the
+    // end of input, so expressions like 1--2 keep their meaning.
+    if (ch === '#' || (ch === '-' && text[i + 1] === '-' && (i + 2 >= text.length || /\s/.test(text[i + 2])))) {
+      while (i < text.length && text[i] !== '\n') i++;
+      continue;
+    }
+
+    if (ch === ';') {
+      flush();
+      i++;
+      continue;
+    }
+
+    if (!/\s/.test(ch)) hasContent = true;
+    current += ch;
+    i++;
+  }
+
+  flush();
+  return statements;
+}
+
+// Runs pre-split statements sequentially and stops after the first failure so
+// later statements never run against a broken precondition (e.g. an INSERT
+// after its CREATE TABLE failed). `skipped` reports how many statements were
+// abandoned. A transport failure on the FIRST statement still throws - the
+// callers' existing unreachable-node rendering handles that case - but once
+// partial results exist the failure is folded into them as an error set.
+export async function runSqlStatements(connection, statements) {
+  const results = [];
+  let skipped = 0;
+
+  for (let index = 0; index < statements.length; index++) {
+    let sets;
+    try {
+      sets = await runSql(connection, statements[index]);
+    } catch (error) {
+      if (index === 0) throw error;
+      sets = [{ columns: [], data: [], total: 0, error: error.message || String(error), warning: '' }];
+    }
+    if (!Array.isArray(sets) || !sets.length) {
+      sets = [{ columns: [], data: [], total: 0, error: '', warning: '' }];
+    }
+    results.push(...sets);
+    if (sets.some((set) => set?.error)) {
+      skipped = statements.length - index - 1;
+      break;
+    }
+  }
+
+  return { results, skipped };
+}
+
 export function collectMessages(results) {
   const sets = Array.isArray(results) ? results : [results];
   const messages = [];
@@ -325,9 +436,18 @@ export async function countRows(connection, table, search = '') {
   return { results, total: Number(value) || 0 };
 }
 
+// max_matches result slots are held in memory per query, so paging is capped
+// instead of letting a deep offset (OPTION max_matches=1000000025) exhaust the
+// node's RAM. Deeper access belongs in the SQL console with an explicit
+// OPTION max_matches.
+export const maxBrowseWindow = 1000000;
+
 export async function selectRows(connection, table, options = {}) {
   const limit = Math.min(Math.max(Number.parseInt(options.limit || 25, 10) || 25, 1), 200);
   const offset = Math.max(Number.parseInt(options.offset || 0, 10) || 0, 0);
+  if (offset + limit > maxBrowseWindow) {
+    throw badInput(`Cannot browse past row ${maxBrowseWindow}; narrow the search or use the SQL console with OPTION max_matches`);
+  }
   const sort = options.sort ? ` ORDER BY ${quoteIdentifier(options.sort)} ${options.dir === 'desc' ? 'DESC' : 'ASC'}` : '';
   // Manticore rejects OFFSET past max_matches (default 1000), which kills
   // pagination beyond row 1000; raise it to exactly what this page needs.

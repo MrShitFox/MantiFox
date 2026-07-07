@@ -15,14 +15,17 @@ import {
   hasResultErrors,
   insertDocument,
   listTables,
+  maxBrowseWindow,
   ping,
   replaceDocument,
   requireRealtimeTable,
   runSql,
+  runSqlStatements,
   selectRowById,
   selectRows,
   showCreateTable,
-  showTableStatus
+  showTableStatus,
+  splitSqlStatements
 } from '../manticore.js';
 import {
   createConnection,
@@ -173,7 +176,13 @@ async function handleConnectionPages(req, res, url, parts) {
         }
         return redirect(res, '/');
       } catch (error) {
-        return respond(req, res, 400, renderEditConnectionPage({ connection, error: error.message }));
+        // Re-render with what the user typed, not the stored row, so a typo in
+        // one field does not wipe the rest of their edits. Secrets are safe to
+        // spread: the form never echoes password/bearer_token values back.
+        return respond(req, res, 400, renderEditConnectionPage({
+          connection: { ...connection, ...form, id: connection.id },
+          error: error.message
+        }));
       }
     }
   }
@@ -250,16 +259,22 @@ function renderTestOutput(id, failed, text) {
 async function handleConsoleRun(req, res, connection) {
   const form = await readForm(req);
   const sql = String(form.sql || '');
+  // /sql?mode=raw only takes one statement per request, so pasted scripts are
+  // split and submitted statement by statement (§4.1).
+  const statements = splitSqlStatements(sql);
 
-  if (!sql.trim()) {
+  if (!statements.length) {
     if (isHtmx(req)) return sendHtml(res, 400, renderConsoleResults({ error: 'SQL is required' }), pageHeaders);
     return respond(req, res, 400, renderConsolePage({ connection, sql, error: 'SQL is required' }));
   }
 
   try {
-    const results = await runSql(connection, sql);
-    if (isHtmx(req)) return sendHtml(res, 200, renderConsoleResults({ results }), pageHeaders);
-    return respond(req, res, 200, renderConsolePage({ connection, sql, results }));
+    const { results, skipped } = await runSqlStatements(connection, statements);
+    const notice = skipped > 0
+      ? `Stopped after a statement failed; ${skipped} later statement${skipped === 1 ? '' : 's'} did not run.`
+      : '';
+    if (isHtmx(req)) return sendHtml(res, 200, renderConsoleResults({ results, notice }), pageHeaders);
+    return respond(req, res, 200, renderConsolePage({ connection, sql, results, notice }));
   } catch (error) {
     const status = error.statusCode || 502;
     if (isHtmx(req)) return sendHtml(res, status, renderConsoleResults({ error: error.message }), pageHeaders);
@@ -366,8 +381,13 @@ async function renderBrowse(req, res, connection, table, query, extras = {}) {
 
     // Resolve the row count first so the requested page can be clamped to the
     // last real page (avoids "Page 999 of 2" and an offset past the last row).
+    // The browse window cap keeps pagination from ever requesting an offset
+    // whose OPTION max_matches could exhaust the node's memory (§4.2).
     const countData = await countRows(connection, table, search);
-    const maxPage = Math.max(1, Math.ceil(countData.total / perPage));
+    const maxPage = Math.max(1, Math.min(
+      Math.ceil(countData.total / perPage),
+      Math.floor(maxBrowseWindow / perPage)
+    ));
     if (page > maxPage) page = maxPage;
     const offset = (page - 1) * perPage;
 

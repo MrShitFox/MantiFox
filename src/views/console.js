@@ -1,7 +1,7 @@
 import { escapeAttr, escapeHtml } from '../html.js';
 import { button, renderAlert, renderResultSets } from './components.js';
 
-export function renderConsolePage({ connection, sql = 'SHOW TABLES', results = null, error = '' }) {
+export function renderConsolePage({ connection, sql = 'SHOW TABLES', results = null, error = '', notice = '' }) {
   const action = `/connections/${connection.id}/console`;
   return {
     title: `SQL console - ${connection.name}`,
@@ -25,20 +25,21 @@ export function renderConsolePage({ connection, sql = 'SHOW TABLES', results = n
     </section>
     <section class="panel">
       <h2>Results</h2>
-      ${renderConsoleResults({ results, error })}
+      ${renderConsoleResults({ results, error, notice })}
     </section>`
   };
 }
 
 // The #console-results fragment htmx swaps after each run. `error` covers
 // request-level failures (unreachable node); per-statement error/warning render
-// inside each result set exactly like they always have.
-export function renderConsoleResults({ results = null, error = '' } = {}) {
+// inside each result set exactly like they always have. `notice` reports
+// script-level facts, e.g. statements skipped after an earlier failure.
+export function renderConsoleResults({ results = null, error = '', notice = '' } = {}) {
   if (error) {
     return `<div id="console-results">${renderAlert(error)}</div>`;
   }
   if (!results) {
     return '<div id="console-results" class="results-placeholder empty">Run a query to see results.</div>';
   }
-  return `<div id="console-results">${renderResultSets(results)}</div>`;
+  return `<div id="console-results">${notice ? renderAlert(notice, 'warning') : ''}${renderResultSets(results)}</div>`;
 }
