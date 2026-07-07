@@ -258,12 +258,14 @@ export function renderRowForm({ action, mode, fields, values = {}, error = '' })
   const visibleFields = mode === 'insert'
     ? fields.filter((rowField) => rowField.name !== 'id')
     : fields;
-  // Saving REPLACEs the whole document, but indexed-only (non-stored) text
-  // fields cannot be read back, so the form starts empty for them and saving
-  // silently erases their indexed content. Warn instead of losing data quietly.
+  // Indexed-only (non-stored) text fields cannot be read back, so the form
+  // starts empty for them. Attribute-only edits are saved with an in-place
+  // UPDATE that preserves their indexed content; changing any full-text field
+  // switches to REPLACE, which resends the whole document and erases whatever
+  // is left empty here. Warn instead of losing data quietly.
   const unreadable = mode === 'edit' ? fields.filter(isUnreadableField).map((rowField) => rowField.name) : [];
   const unreadableWarning = unreadable.length
-    ? renderAlert(`${unreadable.join(', ')}: indexed but not stored, so the current value cannot be shown. Saving replaces the whole row - leaving ${unreadable.length === 1 ? 'this field' : 'these fields'} empty erases ${unreadable.length === 1 ? 'its' : 'their'} indexed content.`, 'warning')
+    ? renderAlert(`${unreadable.join(', ')}: indexed but not stored, so the current value cannot be shown. Attribute-only edits keep ${unreadable.length === 1 ? 'its' : 'their'} indexed content; changing any full-text field replaces the whole row and erases ${unreadable.length === 1 ? 'this field' : 'these fields'} unless you retype ${unreadable.length === 1 ? 'it' : 'them'}.`, 'warning')
     : '';
   return `<form method="post" action="${escapeAttr(action)}" class="stacked-form row-form" hx-sync="this:drop">
     ${renderAlert(error)}

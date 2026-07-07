@@ -32,10 +32,10 @@ import {
   parseMinInfixLen,
   parseShowMeta,
   ping,
-  replaceDocument,
   requireRealtimeTable,
   runSql,
   runSqlStatements,
+  saveRow,
   searchCapabilities,
   searchRankers,
   selectRowById,
@@ -1302,12 +1302,12 @@ async function handleEditRow(req, res, connection, table, rowId) {
   try {
     const { fields } = await loadTableContext(connection, table, 'Edit row');
     const values = valuesFromForm(fields, form);
-    const payload = await replaceDocument(connection, table, rowId, fields, values);
-    const messages = collectJsonMessages(payload);
+    const { plan, payload } = await saveRow(connection, table, rowId, fields, values);
+    const messages = payload ? collectJsonMessages(payload) : [];
     if (messages.length) {
       return renderJsonWriteResult(req, res, connection, table, 'Edit result', messages);
     }
-    return browseSuccess(req, res, connection, table, 'Row saved');
+    return browseSuccess(req, res, connection, table, plan.mode === 'none' ? 'No changes to save' : 'Row saved');
   } catch (error) {
     return renderEditForm(req, res, connection, table, rowId, error.message);
   }

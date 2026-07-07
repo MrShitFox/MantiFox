@@ -1,6 +1,6 @@
 import { Buffer } from 'node:buffer';
 import { config } from './config.js';
-import { columnNames } from './html.js';
+import { columnNames, valueToText } from './html.js';
 
 const identifierPattern = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const createColumnTypes = new Set([
@@ -871,6 +871,101 @@ export async function replaceDocument(connection, table, rowId, fields, values) 
     id,
     doc
   });
+}
+
+// Fields UPDATE cannot write in place: full-text content lives in the FT index
+// (only REPLACE reindexes it — and updating just the attribute half of a
+// `string indexed attribute` column leaves the FT index matching the OLD value,
+// verified against the node), and float_vector goes down the MVA parser on
+// /update and errors. Everything else is a row-wise attribute.
+export function isReplaceOnlyField(field) {
+  const type = String(field?.type || '').toLowerCase();
+  const properties = String(field?.properties || '').toLowerCase();
+  return type.includes('text') || type.includes('float_vector') || properties.includes('indexed');
+}
+
+function normalizeFormText(value) {
+  return String(value ?? '').replace(/\r\n?/g, '\n');
+}
+
+// Decide how to save an edited row (§4.3 bug #5): UPDATE when only attributes
+// changed (in-place, preserves full-text content REPLACE would wipe), REPLACE
+// only when a replace-only field actually changed. Readability is data-driven:
+// SELECT * omits columns that cannot be read back (verified), so a missing key
+// on the loaded row marks the field unreadable — for those, any non-empty
+// submitted value counts as a change (empty means "leave as is").
+// `lossless` reports whether REPLACE would lose nothing (every replace-only
+// field readable), so callers know when a failed UPDATE may retry as REPLACE.
+export function planRowSave({ fields, currentRow, values }) {
+  const submitted = (name) => Object.prototype.hasOwnProperty.call(values || {}, name);
+  const replaceOnly = (fields || []).filter((field) => field.name !== 'id' && isReplaceOnlyField(field));
+
+  const lossless = replaceOnly.every(
+    (field) => currentRow && Object.prototype.hasOwnProperty.call(currentRow, field.name)
+  );
+
+  if (!currentRow) return { mode: 'replace', lossless: false };
+
+  let changed = false;
+  for (const field of replaceOnly) {
+    if (!submitted(field.name)) continue;
+    const value = normalizeFormText(values[field.name]);
+    if (Object.prototype.hasOwnProperty.call(currentRow, field.name)) {
+      if (value !== normalizeFormText(valueToText(currentRow[field.name]))) {
+        changed = true;
+        break;
+      }
+    } else if (value.trim() !== '') {
+      changed = true;
+      break;
+    }
+  }
+  if (changed) return { mode: 'replace', lossless };
+
+  const hasAttributeInput = (fields || []).some(
+    (field) => field.name !== 'id' && !isReplaceOnlyField(field) && submitted(field.name)
+  );
+  return { mode: hasAttributeInput ? 'update' : 'none', lossless };
+}
+
+// In-place attribute write (POST /update). Replace-only fields are excluded
+// from the doc — the caller only takes this path when none of them changed.
+export async function updateDocument(connection, table, rowId, fields, values) {
+  const attributeFieldList = (fields || []).filter((field) => !isReplaceOnlyField(field));
+  const { id, doc } = rowPayloadFromValues(attributeFieldList, values, rowId);
+  return runJsonAction(connection, '/update', {
+    table: jsonTableName(table),
+    id,
+    doc
+  });
+}
+
+// Save an edited row: UPDATE for attribute-only changes, REPLACE only when a
+// replace-only field changed (§4.3 bug #5 — an unconditional REPLACE wiped the
+// indexed content of non-stored text fields on every attribute edit).
+export async function saveRow(connection, table, rowId, fields, values) {
+  const rowResults = await selectRowById(connection, table, rowId);
+  const currentRow = rowResults[0]?.data?.[0] || null;
+  const plan = planRowSave({ fields, currentRow, values });
+
+  if (plan.mode === 'none') return { plan, payload: null };
+  if (plan.mode === 'replace') {
+    return { plan, payload: await replaceDocument(connection, table, rowId, fields, values) };
+  }
+  try {
+    return { plan, payload: await updateDocument(connection, table, rowId, fields, values) };
+  } catch (error) {
+    // Storage-level UPDATE rejection (e.g. a columnar attribute). REPLACE is a
+    // safe retry only when every replace-only field is readable, so the full
+    // document can be resent without losing anything.
+    if (error.manticoreStatus && plan.lossless) {
+      return {
+        plan: { ...plan, mode: 'replace' },
+        payload: await replaceDocument(connection, table, rowId, fields, values)
+      };
+    }
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------

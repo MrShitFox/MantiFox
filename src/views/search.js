@@ -5,6 +5,7 @@ import {
   highlightAfter,
   highlightBefore,
   isTextField,
+  maxBrowseWindow,
   searchFacetLimit,
   searchRankers,
   storedTextFields,
@@ -602,7 +603,12 @@ function renderHit({ tablePath, profile, state, row, stored, attrFields }) {
 // --- pagination -----------------------------------------------------------------
 
 function renderSearchPagination({ basePath, state, total }) {
-  const maxPage = Math.max(1, Math.ceil(total / state.perPage));
+  // Same cap as the route (§4.2): pages past the browse window are never
+  // reachable, so Next must not point at them.
+  const maxPage = Math.max(1, Math.min(
+    Math.ceil(total / state.perPage),
+    Math.floor(maxBrowseWindow / state.perPage)
+  ));
   if (maxPage <= 1) return '';
   const link = (targetPage, label, isEdge) => {
     const href = searchUrl(basePath, state, { page: targetPage });
@@ -623,9 +629,17 @@ export function renderRowDetail({ connection, table, fields, row, canWrite, asFr
   const known = new Set((fields || []).map((item) => item.name));
   const extras = Object.keys(row || {}).filter((key) => !known.has(key) && !key.startsWith('_mfx_'));
 
+  // A schema field missing from the row was omitted by SELECT * because it
+  // cannot be read back (indexed-only text) — say so instead of rendering the
+  // same dash an empty value gets.
   const pairs = [
-    ...(fields || []).map((item) => [item.name, row?.[item.name], `${item.type}${item.properties ? `, ${item.properties}` : ''}`]),
-    ...extras.map((key) => [key, row?.[key], ''])
+    ...(fields || []).map((item) => [
+      item.name,
+      row?.[item.name],
+      `${item.type}${item.properties ? `, ${item.properties}` : ''}`,
+      !Object.prototype.hasOwnProperty.call(row || {}, item.name)
+    ]),
+    ...extras.map((key) => [key, row?.[key], '', false])
   ];
 
   const body = `<div class="row-detail-card">
@@ -638,9 +652,11 @@ export function renderRowDetail({ connection, table, fields, row, canWrite, asFr
       </span>
     </header>
     <dl class="status-grid row-detail-grid">
-      ${pairs.map(([name, value, hint]) => `<div>
+      ${pairs.map(([name, value, hint, unreadable]) => `<div>
         <dt><code>${escapeHtml(name)}</code>${hint ? ` <small class="muted">${escapeHtml(hint)}</small>` : ''}</dt>
-        <dd><code>${escapeHtml(valueToText(value) === '' ? '—' : valueToText(value))}</code></dd>
+        <dd>${unreadable
+          ? '<span class="muted">not stored — value unreadable</span>'
+          : `<code>${escapeHtml(valueToText(value) === '' ? '—' : valueToText(value))}</code>`}</dd>
       </div>`).join('')}
     </dl>
   </div>`;

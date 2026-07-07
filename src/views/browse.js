@@ -1,4 +1,5 @@
 import { columnNames, escapeAttr, escapeHtml, urlWithParams } from '../html.js';
+import { maxBrowseWindow } from '../manticore.js';
 import {
   button,
   checkboxCard,
@@ -127,7 +128,9 @@ export function renderBrowseDataPanel({
   hasText = true
 }) {
   const offset = (page - 1) * perPage;
-  const maxPage = Math.max(1, Math.ceil(total / perPage));
+  // Same cap as the route (§4.2): pages past the browse window are never
+  // reachable, so Next must not point at them.
+  const maxPage = Math.max(1, Math.min(Math.ceil(total / perPage), Math.floor(maxBrowseWindow / perPage)));
   const rows = rowsResult?.data || [];
   const columns = columnNames(rowsResult);
   const basePath = `/connections/${connection.id}/tables/${encodeURIComponent(table)}`;

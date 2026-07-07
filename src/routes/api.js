@@ -10,10 +10,10 @@ import {
   listTables,
   maxBrowseWindow,
   ping,
-  replaceDocument,
   requireRealtimeTable,
   runSql,
   runSqlStatements,
+  saveRow,
   selectRowById,
   selectRows,
   showTableStatus,
@@ -199,9 +199,11 @@ async function handleRowsApi(req, res, url, connection, table, parts) {
       if (hasResultErrors(schemaResults)) {
         return sendJson(res, 400, { error: 'Could not read schema', messages: collectMessages(schemaResults), results: schemaResults });
       }
-      const result = await replaceDocument(connection, table, rowId, fields, values);
-      const messages = collectJsonMessages(result);
-      return sendJson(res, messages.some((message) => message.type === 'error') ? 400 : 200, { result, messages });
+      // UPDATE for attribute-only changes, REPLACE only when a full-text field
+      // changed (§4.3 bug #5) — same write plan as the HTML edit form.
+      const { plan, payload: result } = await saveRow(connection, table, rowId, fields, values);
+      const messages = result ? collectJsonMessages(result) : [];
+      return sendJson(res, messages.some((message) => message.type === 'error') ? 400 : 200, { result, mode: plan.mode, messages });
     }
 
     if (req.method === 'DELETE') {
