@@ -147,7 +147,13 @@ export async function manticoreRequest(connection, endpoint, options = {}) {
     if (!response.ok) {
       const detail = manticoreErrorText(payload?.error) || manticoreErrorText(payload?.message)
         || text || response.statusText;
-      throw new Error(`Manticore HTTP ${response.status}: ${detail}`);
+      // manticoreStatus marks "the node answered, the query itself failed"
+      // (Manticore uses 500 even for plain syntax errors) as opposed to the
+      // transport failures below — callers can render these inline instead of
+      // treating them like an unreachable node.
+      throw Object.assign(new Error(`Manticore HTTP ${response.status}: ${detail}`), {
+        manticoreStatus: response.status
+      });
     }
 
     return payload;
@@ -865,6 +871,390 @@ export async function replaceDocument(connection, table, rowId, fields, values) 
     id,
     doc
   });
+}
+
+// ---------------------------------------------------------------------------
+// Full-text search (the Search UI, §4.7)
+// ---------------------------------------------------------------------------
+
+// Rankers accepted by OPTION ranker= (§4.7). expr()/export need a formula
+// argument, so the dropdown offers only the parameterless ones.
+export const searchRankers = [
+  'proximity_bm25',
+  'bm25',
+  'none',
+  'wordcount',
+  'proximity',
+  'matchany',
+  'fieldmask',
+  'sph04'
+];
+export const defaultRanker = 'proximity_bm25';
+
+// HIGHLIGHT() output must stay escapable: the snippets are wrapped in these
+// private-use sentinels (verified they survive the round trip), the whole
+// string is HTML-escaped, and only then are the sentinels turned into real
+// <mark> tags — so the ONLY markup in a snippet is the highlight itself.
+export const highlightBefore = '\uE000';
+export const highlightAfter = '\uE001';
+
+export function isTextField(field) {
+  return String(field?.type || '').toLowerCase().includes('text');
+}
+
+export function textFields(fields) {
+  return (fields || []).filter(isTextField);
+}
+
+// HIGHLIGHT() reads from the docstore, so only stored text fields can produce
+// snippets (an indexed-only field returns '' — verified against the node).
+export function storedTextFields(fields) {
+  return textFields(fields).filter((field) => String(field.properties || '').toLowerCase().includes('stored'));
+}
+
+// Attributes usable for WHERE filters and FACET. json needs a subkey path and
+// float_vector is KNN-only, so both stay out of the dropdowns.
+export function filterableFields(fields) {
+  return attributeFields(fields).filter((field) => {
+    const type = String(field.type || '').toLowerCase();
+    return !type.includes('json') && !type.includes('float_vector');
+  });
+}
+
+const filterOperators = new Set(['=', '!=', '<', '<=', '>', '>=']);
+const equalityOnly = new Set(['=', '!=']);
+
+function filterValueSql(field, value, label) {
+  const type = String(field.type || '').toLowerCase();
+  const raw = String(value ?? '').trim();
+  if (type.includes('bool')) {
+    if (!['0', '1', 'true', 'false'].includes(raw.toLowerCase())) {
+      throw badInput(`${label}: bool filters take 0 or 1`);
+    }
+    return ['1', 'true'].includes(raw.toLowerCase()) ? '1' : '0';
+  }
+  if (type.includes('float')) {
+    if (!raw || !Number.isFinite(Number(raw))) throw badInput(`${label} must be a finite number`);
+    return String(Number(raw));
+  }
+  if (type.includes('timestamp')) {
+    if (/^\d+$/.test(raw)) return raw;
+    const parsed = Date.parse(raw);
+    if (!Number.isFinite(parsed)) throw badInput(`${label} must be a unix timestamp or a parseable date`);
+    return String(Math.floor(parsed / 1000));
+  }
+  if (type.includes('bigint') || type.includes('mva64') || type.includes('multi64')) {
+    if (!/^-?\d+$/.test(raw)) throw badInput(`${label} must be an integer`);
+    return String(BigInt(raw));
+  }
+  if (type === 'uint' || type.includes('int') || type.includes('mva') || type.includes('multi')) {
+    if (!/^\d+$/.test(raw)) throw badInput(`${label} must be an unsigned integer`);
+    return String(BigInt(raw));
+  }
+  // string attributes and `text ... attribute` columns compare as strings
+  return sqlString(raw);
+}
+
+// One attribute filter: { attr, op, value } -> validated SQL condition.
+// Identifiers are validated (never escaped), operators come from a fixed set,
+// values are typed per the DESC type and escaped/normalized accordingly.
+export function buildFilterCondition(fields, filter) {
+  const attr = validateIdentifier(filter.attr);
+  const field = filterableFields(fields).find((candidate) => candidate.name === attr);
+  if (!field) throw badInput(`${attr} is not a filterable attribute of this table`);
+  const op = String(filter.op || '=').trim();
+  if (!filterOperators.has(op)) throw badInput(`Unsupported filter operator: ${op}`);
+  const type = String(field.type || '').toLowerCase();
+  const stringLike = !['bool', 'float', 'timestamp', 'bigint', 'uint', 'int'].some((numeric) => type.includes(numeric))
+    && !type.includes('mva') && !type.includes('multi');
+  if ((stringLike || type.includes('bool') || type.includes('mva') || type.includes('multi')) && !equalityOnly.has(op)) {
+    throw badInput(`${attr}: ${field.type} filters support only = and !=`);
+  }
+  return `${quoteIdentifier(attr)} ${op} ${filterValueSql(field, filter.value, attr)}`;
+}
+
+// The MATCH() expression for the two UI modes (§4.6/§4.7):
+// - plain: user text is matched literally — BOTH the full-text operators and
+//   (later, in sqlString) the SQL literal are escaped;
+// - advanced: the user is typing operators on purpose — only the SQL literal
+//   layer applies (sqlString at build time), operators pass through.
+// Field scoping wraps the query with @field / @(f1,f2).
+export function buildMatchExpression({ mode, query, fieldNames = [], allTextFieldNames = [], fuzzy = false }) {
+  const raw = String(query || '').trim();
+  if (!raw) return '';
+
+  if (fuzzy) {
+    // Buddy re-embeds the fuzzy MATCH string into an internal call and chokes
+    // on anything but words / a quoted phrase (verified: even a correctly
+    // SQL-escaped apostrophe is a server-side syntax error). Reject early with
+    // an actionable message instead of sending a doomed statement; field
+    // scoping is equally off-limits (it would inject the @ operator).
+    if (!/^[\p{L}\p{N}\s"]+$/u.test(raw)) {
+      throw badInput('Fuzzy search accepts plain words (and an optional "quoted phrase") only. Remove operators, apostrophes and other special characters, or turn fuzzy off.');
+    }
+    if (((raw.match(/"/g) || []).length % 2) !== 0) {
+      throw badInput('Fuzzy search: unbalanced quotes in the query');
+    }
+    return raw;
+  }
+
+  const scoped = [...new Set(fieldNames)].filter((name) => allTextFieldNames.includes(name));
+  const allSelected = scoped.length === 0 || scoped.length === allTextFieldNames.length;
+  const body = mode === 'advanced' ? raw : escapeMatchQuery(raw);
+  if (allSelected) return body;
+  scoped.forEach((name) => validateIdentifier(name));
+  const scope = scoped.length === 1 ? `@${scoped[0]}` : `@(${scoped.join(',')})`;
+  return mode === 'advanced' ? `${scope} (${body})` : `${scope} ${body}`;
+}
+
+function fuzzyOptionSql({ fuzzy, distance, preserve, layouts }) {
+  if (!fuzzy) return [];
+  const options = ['fuzzy=1'];
+  if (distance !== undefined && distance !== null && String(distance).trim() !== '') {
+    const value = Number.parseInt(String(distance), 10);
+    if (!Number.isInteger(value) || value < 0 || value > 4) throw badInput('Fuzzy distance must be an integer between 0 and 4');
+    options.push(`distance=${value}`);
+  }
+  if (preserve) options.push('preserve=1');
+  const layoutList = String(layouts || '').trim();
+  if (layoutList) {
+    if (!/^[a-z]{2}(,[a-z]{2})*$/i.test(layoutList)) throw badInput("Fuzzy layouts must look like 'us,ru'");
+    options.push(`layouts=${sqlString(layoutList.toLowerCase())}`);
+  }
+  return options;
+}
+
+function fieldWeightOptionSql(weights, allTextFieldNames) {
+  const entries = Object.entries(weights || {})
+    .filter(([, value]) => String(value ?? '').trim() !== '')
+    .map(([name, value]) => {
+      validateIdentifier(name);
+      if (!allTextFieldNames.includes(name)) throw badInput(`${name} is not a text field, so it cannot carry a field weight`);
+      const weight = Number.parseInt(String(value), 10);
+      if (!Number.isInteger(weight) || weight < 0 || weight > 1000000) {
+        throw badInput(`Field weight for ${name} must be an integer between 0 and 1000000`);
+      }
+      return `${name}=${weight}`;
+    });
+  return entries.length ? [`field_weights=(${entries.join(', ')})`] : [];
+}
+
+export const searchFacetLimit = 12;
+
+// The one-statement search SELECT (§4.7): match + filters + highlight +
+// ranking options + optional FACET. In attribute-scan mode (no MATCH) the
+// score/highlight/ranker parts simply drop out and the same statement becomes
+// a filtered scan. Set appendMeta only when the capability probe confirmed
+// multi-statement `; SHOW META` works on this node (§4.1 forbids relying on it).
+export function buildSearchSql({
+  table,
+  fields,
+  matchExpression = '',
+  filters = [],
+  ranker = defaultRanker,
+  weights = {},
+  fuzzy = false,
+  distance,
+  preserve = false,
+  layouts = '',
+  facet = '',
+  limit,
+  offset,
+  appendMeta = false
+}) {
+  const tableSql = quoteIdentifier(table);
+  const hasMatch = Boolean(matchExpression);
+  const allTextFieldNames = textFields(fields).map((field) => field.name);
+
+  const select = ['*'];
+  if (hasMatch) {
+    select.push('weight() AS _mfx_score');
+    for (const field of storedTextFields(fields)) {
+      validateIdentifier(field.name);
+      select.push(
+        `HIGHLIGHT({before_match=${sqlString(highlightBefore)},after_match=${sqlString(highlightAfter)},around=8,limit=300},${sqlString(field.name)}) AS _mfx_hl_${field.name}`
+      );
+    }
+  }
+
+  const where = [];
+  if (hasMatch) where.push(`MATCH(${sqlString(matchExpression)})`);
+  for (const filter of filters) where.push(buildFilterCondition(fields, filter));
+
+  const options = [];
+  if (hasMatch) {
+    if (!searchRankers.includes(ranker)) throw badInput(`Unknown ranker: ${ranker}`);
+    options.push(`ranker=${ranker}`);
+    options.push(...fieldWeightOptionSql(weights, allTextFieldNames));
+    options.push(...fuzzyOptionSql({ fuzzy, distance, preserve, layouts }));
+  }
+  // Manticore rejects a window past max_matches (default 1000, §4.2); raise it
+  // to exactly this page's needs. The caller clamps offset+limit to
+  // maxBrowseWindow before we get here.
+  if (offset + limit > 1000) options.push(`max_matches=${offset + limit}`);
+
+  let facetSql = '';
+  if (facet) {
+    const facetField = filterableFields(fields).find((candidate) => candidate.name === facet);
+    if (!facetField) throw badInput(`${facet} is not a facetable attribute of this table`);
+    facetSql = ` FACET ${quoteIdentifier(facet)} ORDER BY COUNT(*) DESC LIMIT ${searchFacetLimit}`;
+  }
+
+  const sql = `SELECT ${select.join(', ')} FROM ${tableSql}`
+    + (where.length ? ` WHERE ${where.join(' AND ')}` : '')
+    + ` LIMIT ${offset}, ${limit}`
+    + (options.length ? ` OPTION ${options.join(', ')}` : '')
+    + facetSql;
+
+  return appendMeta ? `${sql}; SHOW META` : sql;
+}
+
+// COUNT for pagination. Fuzzy options change what matches, so they must ride
+// along; ranker/weights only affect ordering and stay out.
+export function buildSearchCountSql({ table, fields, matchExpression = '', filters = [], fuzzy = false, distance, preserve, layouts = '' }) {
+  const where = [];
+  if (matchExpression) where.push(`MATCH(${sqlString(matchExpression)})`);
+  for (const filter of filters) where.push(buildFilterCondition(fields, filter));
+  const options = matchExpression ? fuzzyOptionSql({ fuzzy, distance, preserve, layouts }) : [];
+  return `SELECT COUNT(*) AS count FROM ${quoteIdentifier(table)}`
+    + (where.length ? ` WHERE ${where.join(' AND ')}` : '')
+    + (options.length ? ` OPTION ${options.join(', ')}` : '');
+}
+
+// --- capability probes (once per connection, cached) -----------------------
+
+const capabilityCacheTtlMs = 10 * 60 * 1000;
+const capabilityCache = new Map();
+
+function capabilityCacheKey(connection) {
+  return [connection.id ?? '', connectionBaseUrl(connection), connection.auth_type ?? '', connection.username ?? ''].join('|');
+}
+
+// Feature-detect per connection (§4.7). `buddy` (SHOW VERSION lists a Buddy
+// component) gates the fuzzy/autocomplete/suggest controls. `multiMeta`
+// tracks whether this node handles `SELECT ...; SHOW META` in one request:
+// multi-statement is not dependable across versions (§4.1) and a standalone
+// probe statement is not either (verified: `SELECT 1; SHOW META` errors and
+// `SHOW TABLES; SHOW META` collapses to one result set on a node where the
+// real search shape works) — so it starts optimistic and the FIRST real
+// search demotes it via demoteMultiMeta() when the node lets us down; the
+// search itself always retries as a single statement.
+export async function searchCapabilities(connection) {
+  const key = capabilityCacheKey(connection);
+  const cached = capabilityCache.get(key);
+  if (cached && Date.now() - cached.at < capabilityCacheTtlMs) return cached.value;
+
+  const value = { buddy: false, multiMeta: true };
+  try {
+    const versionSets = await runSql(connection, 'SHOW VERSION');
+    value.buddy = (versionSets[0]?.data || []).some((row) => (
+      String(row.Component || '').toLowerCase() === 'buddy' && String(row.Version || '').trim() !== ''
+    ));
+  } catch {
+    // no answer -> just hide the Buddy-gated controls
+  }
+
+  capabilityCache.set(key, { at: Date.now(), value });
+  return value;
+}
+
+// Called when a real `<search>; SHOW META` request failed or came back in an
+// unexpected shape: stop appending META for this connection so later searches
+// go straight to the single-statement + CALL KEYWORDS fallback.
+export function demoteMultiMeta(connection) {
+  const cached = capabilityCache.get(capabilityCacheKey(connection));
+  if (cached) cached.value.multiMeta = false;
+}
+
+// min_infix_len from SHOW TABLE <t> SETTINGS ("settings" row carries the
+// option list as one string). Autocomplete/suggest need it > 0.
+export function parseMinInfixLen(settingsResultSet) {
+  for (const row of settingsResultSet?.data || []) {
+    const match = /(?:^|\s)min_infix_len\s*=\s*'?(\d+)'?/.exec(String(row.Value ?? ''));
+    if (match) return Number.parseInt(match[1], 10);
+  }
+  return 0;
+}
+
+export async function showTableSettings(connection, table) {
+  return runSql(connection, `SHOW TABLE ${quoteIdentifier(table)} SETTINGS`);
+}
+
+// --- SHOW META / CALL KEYWORDS -> one insight shape -------------------------
+
+// SHOW META rows -> { total, totalFound, time, keywords[] }. The meta set is
+// identified by its Variable_name/Value columns; keyword[i]/docs[i]/hits[i]
+// triples are folded into rows.
+export function parseShowMeta(resultSet) {
+  const variables = {};
+  const keywords = [];
+  for (const row of resultSet?.data || []) {
+    const name = String(row.Variable_name ?? '');
+    const value = String(row.Value ?? '');
+    const indexed = /^(keyword|docs|hits)\[(\d+)\]$/.exec(name);
+    if (indexed) {
+      const index = Number.parseInt(indexed[2], 10);
+      keywords[index] = keywords[index] || { keyword: '', docs: '', hits: '' };
+      keywords[index][indexed[1] === 'keyword' ? 'keyword' : indexed[1]] = value;
+    } else {
+      variables[name] = value;
+    }
+  }
+  return {
+    total: variables.total ?? '',
+    totalFound: variables.total_found ?? '',
+    totalRelation: variables.total_relation ?? '',
+    time: variables.time ?? '',
+    keywords: keywords.filter(Boolean)
+  };
+}
+
+export function looksLikeMetaSet(resultSet) {
+  return (resultSet?.data || []).some((row) => row && typeof row === 'object' && 'Variable_name' in row);
+}
+
+// CALL KEYWORDS(..., 1 AS stats) fallback when the node cannot do
+// `; SHOW META` in one request: per-keyword docs/hits, same insight shape.
+export async function callKeywordStats(connection, table, matchExpression) {
+  const sql = `CALL KEYWORDS(${sqlString(matchExpression)}, ${sqlString(validateIdentifier(table))}, 1 AS stats)`;
+  const results = await runSql(connection, sql);
+  const keywords = (results[0]?.data || []).map((row) => ({
+    keyword: String(row.normalized ?? row.tokenized ?? ''),
+    docs: String(row.docs ?? ''),
+    hits: String(row.hits ?? '')
+  }));
+  return { results, keywords };
+}
+
+export async function explainQuery(connection, table, matchExpression) {
+  return runSql(connection, `EXPLAIN QUERY ${quoteIdentifier(table)} ${sqlString(matchExpression)}`);
+}
+
+// --- Buddy extras: autocomplete + did-you-mean ------------------------------
+
+export async function callAutocomplete(connection, table, prefix) {
+  const results = await runSql(
+    connection,
+    `CALL AUTOCOMPLETE(${sqlString(prefix)}, ${sqlString(validateIdentifier(table))})`
+  );
+  const suggestions = (results[0]?.data || [])
+    .map((row) => String(row.query ?? Object.values(row)[0] ?? ''))
+    .filter(Boolean);
+  return { results, suggestions };
+}
+
+// QSUGGEST corrects the LAST word of the query — good for did-you-mean.
+export async function callQsuggest(connection, table, query) {
+  const results = await runSql(
+    connection,
+    `CALL QSUGGEST(${sqlString(query)}, ${sqlString(validateIdentifier(table))})`
+  );
+  const suggestions = (results[0]?.data || []).map((row) => ({
+    suggest: String(row.suggest ?? ''),
+    distance: Number(row.distance ?? 0),
+    docs: String(row.docs ?? '')
+  })).filter((row) => row.suggest);
+  return { results, suggestions };
 }
 
 export function collectJsonMessages(payload) {

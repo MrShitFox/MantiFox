@@ -11,6 +11,7 @@
   function enhance(root) {
     forEachMatch(root, '.connection-form', syncAuthFields);
     forEachMatch(root, '[data-column-row], .add-column-form', syncColumnKind);
+    forEachMatch(root, '.search-form', syncFuzzy);
   }
 
   function forEachMatch(root, selector, fn) {
@@ -70,6 +71,27 @@
     });
   }
 
+  /* --- fuzzy vs advanced/field-scope (search form) ---
+         Fuzzy MATCH takes bare words only: the advanced radio and the field
+         checkboxes are disabled while fuzzy is on (the server enforces the
+         same rule; this just keeps the form honest). --- */
+
+  function syncFuzzy(form) {
+    var fuzzy = form.querySelector('[data-fuzzy-toggle]');
+    if (!fuzzy) return;
+    var on = fuzzy.checked;
+    form.querySelectorAll('[data-search-mode][value="advanced"]').forEach(function (radio) {
+      radio.disabled = on;
+      if (on && radio.checked) {
+        var plain = form.querySelector('[data-search-mode][value="plain"]');
+        if (plain) plain.checked = true;
+      }
+    });
+    form.querySelectorAll('[data-field-scope] input[type="checkbox"]').forEach(function (box) {
+      box.disabled = on;
+    });
+  }
+
   /* ==================================================================== *
    *  Delegated events — they survive any fragment swap.
    * ==================================================================== */
@@ -84,6 +106,16 @@
     if (target.matches('[data-column-type]')) {
       var row = target.closest('[data-column-row], .add-column-form');
       if (row) syncColumnKind(row);
+    }
+    if (target.matches('[data-fuzzy-toggle]') || target.matches('[data-search-mode]')) {
+      var searchForm = target.closest('form');
+      if (searchForm) {
+        if (target.matches('[data-search-mode]') && target.value === 'advanced' && target.checked) {
+          var fuzzyBox = searchForm.querySelector('[data-fuzzy-toggle]');
+          if (fuzzyBox) fuzzyBox.checked = false;
+        }
+        syncFuzzy(searchForm);
+      }
     }
   });
 
@@ -151,6 +183,15 @@
     var toastClose = target.closest('[data-toast-close]');
     if (toastClose) {
       dismissToast(toastClose.closest('.toast'));
+      return;
+    }
+
+    // Search hit detail cards close client-side — the fragment was already
+    // fetched, clearing the container needs no round trip.
+    var detailClose = target.closest('[data-detail-close]');
+    if (detailClose) {
+      var detail = detailClose.closest('.row-detail');
+      if (detail) detail.replaceChildren();
     }
   });
 

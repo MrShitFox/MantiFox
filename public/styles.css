@@ -1114,6 +1114,535 @@ html:has(.htmx-request) {
   color: #d8f5c9;
 }
 
+/* ======================================================================
+   Search screen
+   The headline full-text UI (§4.7): mode pills, operator cheat-sheet,
+   filter chips, facets, highlighted snippets, query insight. Reuses the
+   existing tokens only — no new colors outside the accent/danger family.
+   ====================================================================== */
+
+.search-form {
+  gap: 0.85rem;
+}
+
+.search-main {
+  display: flex;
+  align-items: stretch;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.mode-toggle {
+  display: inline-flex;
+  padding: 0.25rem;
+  gap: 0.25rem;
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+  background: #0e121a;
+}
+
+.mode-pill {
+  position: relative;
+  display: inline-flex;
+}
+
+.mode-pill input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  opacity: 0;
+  cursor: pointer;
+}
+
+.mode-pill span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 2.1rem;
+  padding: 0.3rem 0.85rem;
+  border-radius: 0.65rem;
+  color: var(--muted);
+  font-weight: 600;
+  transition:
+    background var(--speed) var(--ease),
+    color var(--speed) var(--ease),
+    box-shadow var(--speed) var(--ease);
+}
+
+.mode-pill input:checked + span {
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  color: #06231d;
+}
+
+.mode-pill input:focus-visible + span {
+  box-shadow: var(--ring);
+}
+
+.mode-pill input:disabled + span {
+  opacity: 0.4;
+}
+
+.mode-pill input:not(:checked):not(:disabled):hover + span {
+  color: var(--text);
+  background: rgba(141, 223, 203, 0.08);
+}
+
+.search-box {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  flex: 1;
+  min-width: min(340px, 100%);
+}
+
+.search-box input[type="search"] {
+  flex: 1;
+  min-width: 0;
+  font-size: 1.05rem;
+  padding: 0.75rem 0.95rem;
+}
+
+/* Mode hints: exactly one is visible, driven by the checked radio. */
+.search-form .mode-hint {
+  display: none;
+  margin: 0;
+}
+
+.search-form:has(input[name="mode"][value="plain"]:checked) .mode-hint-plain {
+  display: block;
+  animation: rise var(--speed) var(--ease-out) both;
+}
+
+.search-form:has(input[name="mode"][value="advanced"]:checked) .mode-hint-advanced {
+  display: flex;
+  animation: rise var(--speed) var(--ease-out) both;
+}
+
+.op-cheatsheet {
+  align-items: center;
+  gap: 0.35rem;
+  flex-wrap: wrap;
+  font-size: 0.88rem;
+}
+
+.cheat-title {
+  margin-right: 0.2rem;
+  font-weight: 600;
+}
+
+.op-chip {
+  display: inline-flex;
+  padding: 0.14rem 0.45rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: rgba(255, 255, 255, 0.025);
+  cursor: help;
+  transition: border-color var(--speed) var(--ease), color var(--speed) var(--ease);
+}
+
+.op-chip:hover {
+  border-color: rgba(141, 223, 203, 0.45);
+  color: var(--text);
+}
+
+.search-options > summary small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.options-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+  gap: 0.8rem;
+  align-items: start;
+  margin-top: 0.8rem;
+}
+
+.scan-options {
+  margin-top: 0;
+}
+
+.option-group {
+  display: grid;
+  gap: 0.6rem;
+  margin: 0;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.option-group legend {
+  padding: 0 0.35rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.option-group legend small {
+  font-size: 0.82rem;
+}
+
+.option-chips {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.checkbox-card.compact-card {
+  min-height: 2.2rem;
+  padding: 0.35rem 0.6rem;
+}
+
+.weight-grid,
+.fuzzy-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(110px, 1fr));
+  gap: 0.6rem;
+}
+
+/* --- Attribute filters (chips + builder) ----------------------------- */
+
+.filter-block {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.filter-block:empty {
+  display: none;
+}
+
+.filter-chips {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.filter-label {
+  font-size: 0.9rem;
+}
+
+.filter-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.4rem;
+  padding: 0.28rem 0.3rem 0.28rem 0.6rem;
+  border: 1px solid rgba(141, 223, 203, 0.4);
+  border-radius: 999px;
+  background: rgba(141, 223, 203, 0.08);
+  animation: pop var(--speed) var(--ease-out) both;
+}
+
+.chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.35rem;
+  height: 1.35rem;
+  border-radius: 50%;
+  color: var(--muted);
+  font-weight: 700;
+  line-height: 1;
+  transition: background var(--speed) var(--ease), color var(--speed) var(--ease);
+}
+
+.chip-remove:hover {
+  background: rgba(255, 122, 144, 0.18);
+  color: var(--danger);
+  text-decoration: none;
+}
+
+.add-filter {
+  display: grid;
+  grid-template-columns: minmax(150px, 1.2fr) minmax(70px, 0.4fr) minmax(120px, 1fr) auto;
+  gap: 0.5rem;
+  align-items: center;
+  max-width: 620px;
+}
+
+/* --- Facets ----------------------------------------------------------- */
+
+.facet-chips {
+  display: flex;
+  gap: 0.5rem;
+  flex-wrap: wrap;
+}
+
+.facet-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.32rem 0.4rem 0.32rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.025);
+  transition:
+    border-color var(--speed) var(--ease),
+    background var(--speed) var(--ease),
+    transform var(--speed) var(--ease);
+}
+
+.facet-chip:hover {
+  border-color: rgba(141, 223, 203, 0.5);
+  text-decoration: none;
+  transform: translateY(-1px);
+}
+
+.facet-chip.active {
+  border-color: rgba(141, 223, 203, 0.6);
+  background: rgba(141, 223, 203, 0.14);
+}
+
+.facet-count {
+  padding: 0.05rem 0.5rem;
+  border-radius: 999px;
+  background: var(--panel-2);
+  color: var(--accent);
+  font-size: 0.85rem;
+  font-weight: 700;
+}
+
+/* --- Results ----------------------------------------------------------- */
+
+.search-results {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.result-list {
+  display: grid;
+  gap: 0.8rem;
+}
+
+.result-card {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid var(--border);
+  border-radius: 1rem;
+  background: rgba(255, 255, 255, 0.025);
+  animation: pop var(--speed-slow) var(--ease-out) both;
+  transition:
+    border-color var(--speed) var(--ease),
+    background var(--speed) var(--ease);
+}
+
+.result-card:nth-child(1) { animation-delay: 0.03s; }
+.result-card:nth-child(2) { animation-delay: 0.07s; }
+.result-card:nth-child(3) { animation-delay: 0.11s; }
+.result-card:nth-child(4) { animation-delay: 0.15s; }
+.result-card:nth-child(n + 5) { animation-delay: 0.19s; }
+
+.result-card:hover {
+  border-color: rgba(141, 223, 203, 0.35);
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.result-card-head {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.result-open {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.95rem;
+}
+
+.score-chip {
+  padding: 0.1rem 0.55rem;
+  border: 1px solid rgba(141, 223, 203, 0.35);
+  border-radius: 999px;
+  color: var(--accent);
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: help;
+}
+
+.result-actions {
+  display: inline-flex;
+  gap: 0.4rem;
+  margin-left: auto;
+}
+
+.result-actions .button,
+.result-actions button {
+  min-height: 1.9rem;
+  padding: 0.22rem 0.55rem;
+  border-radius: 0.55rem;
+  font-size: 0.88rem;
+}
+
+.result-snippets {
+  display: grid;
+  gap: 0.3rem;
+}
+
+.snippet {
+  margin: 0;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.snippet-field {
+  margin-right: 0.5rem;
+  padding: 0.08rem 0.45rem;
+  border-radius: 0.45rem;
+  background: var(--panel-2);
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.78rem;
+}
+
+.search-results mark {
+  padding: 0 0.18rem;
+  border-radius: 0.3rem;
+  background: rgba(141, 223, 203, 0.22);
+  color: var(--accent);
+  font-weight: 700;
+}
+
+.result-attrs {
+  display: flex;
+  gap: 0.4rem 0.9rem;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 0.88rem;
+}
+
+.attr-pair {
+  color: var(--text);
+  overflow-wrap: anywhere;
+}
+
+.attr-name {
+  color: var(--muted);
+}
+
+.attr-name::after {
+  content: ":";
+}
+
+.unreadable-note,
+.toolbar-note {
+  margin: 0 0 0.8rem;
+  font-size: 0.88rem;
+}
+
+.toolbar-note {
+  margin: 0;
+  align-self: center;
+}
+
+/* --- Row detail (full record inside a hit) ---------------------------- */
+
+.row-detail:empty {
+  display: none;
+}
+
+.row-detail-card {
+  display: grid;
+  gap: 0.7rem;
+  margin-top: 0.4rem;
+  padding: 0.9rem;
+  border: 1px solid rgba(141, 223, 203, 0.3);
+  border-radius: 0.8rem;
+  background: var(--panel-2);
+  animation: rise var(--speed) var(--ease-out) both;
+}
+
+.row-detail-card h3 {
+  margin-bottom: 0;
+}
+
+.row-detail-grid div {
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.row-detail-grid dd code {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* --- Query insight ------------------------------------------------------ */
+
+.insight-panel {
+  padding: 0.9rem 1.2rem;
+}
+
+.insight-details summary {
+  flex-wrap: wrap;
+}
+
+.insight-summary {
+  font-weight: 400;
+  font-size: 0.92rem;
+}
+
+.insight-summary b {
+  color: var(--accent);
+}
+
+.insight-body {
+  display: grid;
+  gap: 0.8rem;
+  margin-top: 0.8rem;
+  animation: rise var(--speed-slow) var(--ease-out) both;
+}
+
+.insight-table {
+  min-width: 0;
+  max-width: 560px;
+}
+
+.insight-table th,
+.insight-table td {
+  padding: 0.45rem 0.6rem;
+}
+
+.explain-block summary small {
+  color: var(--muted);
+  font-weight: 400;
+}
+
+.explain-tree {
+  margin: 0.6rem 0 0;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  background: #0e121a;
+  overflow: auto;
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.score-note {
+  margin: 0;
+  font-size: 0.85rem;
+}
+
+.did-you-mean {
+  margin: 0;
+  padding: 0.7rem 1rem;
+  border: 1px solid rgba(255, 209, 102, 0.3);
+  border-radius: 0.8rem;
+  background: rgba(255, 209, 102, 0.08);
+  animation: drop var(--speed) var(--ease-out) both;
+}
+
+@media (max-width: 860px) {
+  .add-filter {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .result-actions {
+    margin-left: 0;
+  }
+}
+
 /* --- Respect reduced-motion preferences ------------------------------ */
 
 @media (prefers-reduced-motion: reduce) {

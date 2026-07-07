@@ -63,6 +63,10 @@ export function renderBrowsePage({
   const basePath = `/connections/${connection.id}/tables/${encodeURIComponent(table)}`;
   const tableType = tableMeta?.type || '';
   const canWrite = tableType === 'rt';
+  // The Search screen is the headline full-text experience and is offered only
+  // when the table can MATCH (has a text field, §4.7); other tables get the
+  // same screen as an honest attribute filter.
+  const hasText = (schema || []).some((field) => String(field.type || '').toLowerCase().includes('text'));
 
   return {
     title: `${table} - ${connection.name}`,
@@ -72,8 +76,11 @@ export function renderBrowsePage({
         <h1>${escapeHtml(table)}</h1>
       </div>
       <div class="button-row">
+        ${hasText
+          ? button({ label: 'Search', href: `${basePath}/search` })
+          : button({ label: 'Filter rows', href: `${basePath}/search`, variant: 'secondary' })}
         ${canWrite
-          ? button({ label: 'Insert row', href: `${basePath}/new` })
+          ? button({ label: 'Insert row', href: `${basePath}/new`, variant: hasText ? 'secondary' : '' })
           : button({ label: 'Insert row', href: `${basePath}/new`, disabled: true, title: 'Row writes require an rt table' })}
         ${canWrite ? button({ label: 'Truncate', href: `${basePath}/truncate`, variant: 'secondary' }) : ''}
         ${canWrite ? button({ label: 'Drop table', href: `${basePath}/drop`, variant: 'secondary danger-link' }) : ''}
@@ -88,7 +95,7 @@ export function renderBrowsePage({
         <h2>Tables</h2>
         ${renderTableList(connection, tables, table)}
       </aside>
-      ${renderBrowseDataPanel({ connection, table, rowsResult, total, page, perPage, search, sort, dir, canWrite })}
+      ${renderBrowseDataPanel({ connection, table, rowsResult, total, page, perPage, search, sort, dir, canWrite, hasText })}
     </div>
     <section class="panel">
       <h2>Schema</h2>
@@ -116,7 +123,8 @@ export function renderBrowseDataPanel({
   search = '',
   sort = '',
   dir = 'asc',
-  canWrite = false
+  canWrite = false,
+  hasText = true
 }) {
   const offset = (page - 1) * perPage;
   const maxPage = Math.max(1, Math.ceil(total / perPage));
@@ -124,14 +132,21 @@ export function renderBrowseDataPanel({
   const columns = columnNames(rowsResult);
   const basePath = `/connections/${connection.id}/tables/${encodeURIComponent(table)}`;
 
+  // MATCH() errors on tables without a text field, so the quick-search box is
+  // only offered when it can work; the full Search screen covers the rest.
+  const quickSearch = hasText
+    ? field({ label: 'Quick text search', hint: 'matched literally', control: textInput({ name: 'q', value: search, attrs: { placeholder: 'Search words…' } }) })
+    : `<p class="muted toolbar-note">No full-text fields — <a href="${escapeAttr(`${basePath}/search`)}">filter rows by attributes</a>.</p>`;
+
   return `<section class="panel data-panel" id="data-panel">
     <form method="get" action="${escapeAttr(basePath)}" class="toolbar" hx-get="${escapeAttr(basePath)}" hx-target="#data-panel" hx-swap="outerHTML" hx-push-url="true" hx-sync="this:drop">
-      ${field({ label: 'Full-text search', control: textInput({ name: 'q', value: search, attrs: { placeholder: 'MATCH query' } }) })}
+      ${quickSearch}
       ${field({ label: 'Rows', control: selectInput({ name: 'perPage', value: perPage, options: [10, 25, 50, 100] }) })}
       ${sort ? `<input type="hidden" name="sort" value="${escapeAttr(sort)}">` : ''}
       ${dir ? `<input type="hidden" name="dir" value="${escapeAttr(dir)}">` : ''}
       ${button({ label: 'Apply', submit: true })}
       ${search ? button({ label: 'Clear', href: basePath, variant: 'secondary', attrs: dataPanelLinkAttrs(basePath) }) : ''}
+      ${hasText ? button({ label: 'Open Search', href: `${basePath}/search`, variant: 'secondary' }) : ''}
     </form>
     <p class="muted">Showing ${escapeHtml(offset + (rows.length ? 1 : 0))}-${escapeHtml(offset + rows.length)} of ${escapeHtml(total)} rows.</p>
     ${renderDataGrid({ connection, table, columns, rows, page, perPage, search, sort, dir, canWrite })}

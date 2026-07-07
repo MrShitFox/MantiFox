@@ -6,26 +6,44 @@ import {
   buildDeleteSql,
   buildCreateTableSql,
   buildDropTableSql,
+  buildMatchExpression,
+  buildSearchCountSql,
+  buildSearchSql,
   buildTruncateTableSql,
+  callAutocomplete,
+  callKeywordStats,
+  callQsuggest,
   collectJsonMessages,
   collectMessages,
   countRows,
+  defaultRanker,
+  demoteMultiMeta,
   describeTable,
+  explainQuery,
+  filterableFields,
   findTable,
   hasResultErrors,
   insertDocument,
+  isRealtimeTable,
   listTables,
+  looksLikeMetaSet,
   maxBrowseWindow,
+  parseMinInfixLen,
+  parseShowMeta,
   ping,
   replaceDocument,
   requireRealtimeTable,
   runSql,
   runSqlStatements,
+  searchCapabilities,
+  searchRankers,
   selectRowById,
   selectRows,
   showCreateTable,
+  showTableSettings,
   showTableStatus,
-  splitSqlStatements
+  splitSqlStatements,
+  textFields
 } from '../manticore.js';
 import {
   createConnection,
@@ -36,7 +54,7 @@ import {
 } from '../db.js';
 import { createLoginSession, destroyRequestSession, expiredSessionCookie, verifyAdminPassword } from '../auth.js';
 import { clampInteger, htmxTarget, isHtmx, pathParts, readForm, redirect, sendHtml } from '../router.js';
-import { escapeHtml } from '../html.js';
+import { columnNames, escapeHtml, valueToText } from '../html.js';
 import { fragment, layout } from '../views/layout.js';
 import {
   renderBrowseDataPanel,
@@ -46,9 +64,19 @@ import {
   renderRowEditPage
 } from '../views/browse.js';
 import { renderConsolePage, renderConsoleResults } from '../views/console.js';
+import {
+  renderAutocompleteDatalist,
+  renderExplainBody,
+  renderFilterBlock,
+  renderRowDetail,
+  renderSearchPage,
+  renderSearchResults,
+  searchBasePath,
+  searchDefaultPerPage
+} from '../views/search.js';
 import { renderDashboardPage, renderEditConnectionPage } from '../views/dashboard.js';
 import { renderLoginPage } from '../views/login.js';
-import { renderOperationPage, renderSqlPreviewForm, renderToastsOob } from '../views/components.js';
+import { renderAlert, renderOperationPage, renderSqlPreviewForm, renderToastsOob } from '../views/components.js';
 
 // The same URL answers both ways: a full page for direct loads and a fragment
 // for htmx requests, so every screen stays deep-linkable and refreshable.
@@ -300,6 +328,22 @@ async function handleTablePages(req, res, url, connection, parts) {
     return renderBrowse(req, res, connection, table, queryFromUrl(url));
   }
 
+  if (parts.length === 2 && parts[1] === 'search' && req.method === 'GET') {
+    return handleSearch(req, res, connection, table, url);
+  }
+
+  if (parts.length === 3 && parts[1] === 'search' && parts[2] === 'autocomplete' && req.method === 'GET') {
+    return handleSearchAutocomplete(req, res, connection, table, url);
+  }
+
+  if (parts.length === 3 && parts[1] === 'search' && parts[2] === 'explain' && req.method === 'GET') {
+    return handleSearchExplain(req, res, connection, table, url);
+  }
+
+  if (parts.length === 4 && parts[1] === 'rows' && parts[3] === 'view' && req.method === 'GET') {
+    return handleRowView(req, res, connection, table, parts[2]);
+  }
+
   if (parts.length === 2 && parts[1] === 'drop') {
     if (req.method === 'GET') {
       return renderTableSqlPreview(req, res, connection, table, 'Drop table', buildDropTableSql(table), {
@@ -365,10 +409,426 @@ async function handleTablePages(req, res, url, connection, parts) {
   return respondNotFound(req, res);
 }
 
+// ---------------------------------------------------------------------------
+// Search (§4.7). GET-only: the whole search state lives in the URL, so every
+// query, facet click and page turn is shareable and history-friendly. The
+// form swaps #search-results; the response also re-sends the #filter-block
+// chips inside the form as an out-of-band swap so they track the URL.
+// ---------------------------------------------------------------------------
+
+function buildSearchProfile({ fields, tableMeta, caps, settingsResults }) {
+  const text = textFields(fields);
+  const minInfixLen = parseMinInfixLen(settingsResults?.[0]);
+  return {
+    fields,
+    hasText: text.length > 0,
+    canWrite: isRealtimeTable(tableMeta),
+    buddy: caps.buddy,
+    // CALL AUTOCOMPLETE / SUGGEST need Buddy AND min_infix_len on the table;
+    // when either is missing the controls are simply not rendered (§4.7).
+    autocomplete: caps.buddy && minInfixLen > 0 && text.length > 0,
+    suggest: caps.buddy && minInfixLen > 0 && text.length > 0,
+    minInfixLen
+  };
+}
+
+function parseFilterToken(raw) {
+  const text = String(raw ?? '');
+  const first = text.indexOf('|');
+  const second = text.indexOf('|', first + 1);
+  if (first < 1 || second < 0) return null;
+  return {
+    attr: text.slice(0, first).trim(),
+    op: text.slice(first + 1, second).trim(),
+    value: text.slice(second + 1)
+  };
+}
+
+// URL/query-string -> normalized search state. Unknown fields, rankers and
+// facet attributes are silently dropped (a shared URL must survive schema
+// drift); semantic conflicts (fuzzy+advanced, ...) are rejected later in
+// executeSearch so the form still renders with the user's input.
+function parseSearchState(searchParams, profile) {
+  const textNames = textFields(profile.fields).map((item) => item.name);
+  const filterableNames = new Set(filterableFields(profile.fields).map((item) => item.name));
+
+  const q = profile.hasText ? String(searchParams.get('q') || '').trim().slice(0, 2000) : '';
+  const mode = searchParams.get('mode') === 'advanced' ? 'advanced' : 'plain';
+
+  let fields = [...new Set(searchParams.getAll('field'))].filter((name) => textNames.includes(name));
+  if (fields.length >= textNames.length) fields = [];
+
+  const rankerParam = String(searchParams.get('ranker') || '').trim();
+  const ranker = searchRankers.includes(rankerParam) ? rankerParam : defaultRanker;
+
+  const weights = {};
+  for (const name of textNames) {
+    const value = searchParams.get(`w_${name}`);
+    if (value !== null && String(value).trim() !== '') weights[name] = String(value).trim().slice(0, 12);
+  }
+
+  const facetParam = String(searchParams.get('facet') || '').trim();
+  const facet = filterableNames.has(facetParam) ? facetParam : '';
+
+  const filters = [];
+  const seen = new Set();
+  const pushFilter = (filter) => {
+    if (!filter || !filter.attr || filters.length >= 12) return;
+    const key = `${filter.attr}|${filter.op}|${filter.value}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    filters.push(filter);
+  };
+  for (const token of searchParams.getAll('f')) pushFilter(parseFilterToken(token));
+  const nfAttr = String(searchParams.get('nf_attr') || '').trim();
+  if (nfAttr) {
+    pushFilter({
+      attr: nfAttr,
+      op: String(searchParams.get('nf_op') || '=').trim() || '=',
+      value: String(searchParams.get('nf_value') ?? '')
+    });
+  }
+
+  return {
+    q,
+    mode,
+    fields,
+    ranker,
+    weights,
+    facet,
+    filters,
+    page: clampInteger(searchParams.get('page'), 1, 1, 1000000),
+    perPage: clampInteger(searchParams.get('perPage'), searchDefaultPerPage, 1, 200),
+    fuzzy: searchParams.get('fuzzy') === '1',
+    distance: String(searchParams.get('distance') || '').trim().slice(0, 2),
+    preserve: searchParams.get('preserve') === '1',
+    layouts: String(searchParams.get('layouts') || '').trim().slice(0, 30)
+  };
+}
+
+// Runs the search and shapes everything the results block needs. User-input
+// problems (bad filter value, fuzzy misuse, MATCH syntax in advanced mode)
+// come back as { error } so the form survives; transport failures throw.
+async function executeSearch(connection, table, profile, state, caps) {
+  const allTextFieldNames = textFields(profile.fields).map((item) => item.name);
+
+  let matchExpression = '';
+  let countSql = '';
+  let searchSql = '';
+  const appendMeta = caps.multiMeta;
+  try {
+    if (state.fuzzy && !profile.buddy) {
+      throw Object.assign(new Error('Fuzzy search needs the Manticore Buddy component, which this server does not report.'), { statusCode: 400 });
+    }
+    if (state.fuzzy && state.mode === 'advanced') {
+      throw Object.assign(new Error('Fuzzy search works in Plain mode only — it accepts bare words, not MATCH operators.'), { statusCode: 400 });
+    }
+    if (state.fuzzy && state.fields.length) {
+      throw Object.assign(new Error('Fuzzy search cannot be limited to specific fields — field scoping uses the @ operator, which fuzzy does not accept.'), { statusCode: 400 });
+    }
+
+    matchExpression = profile.hasText
+      ? buildMatchExpression({
+        mode: state.mode,
+        query: state.q,
+        fieldNames: state.fields,
+        allTextFieldNames,
+        fuzzy: state.fuzzy
+      })
+      : '';
+
+    const common = {
+      table,
+      fields: profile.fields,
+      matchExpression,
+      filters: state.filters,
+      fuzzy: state.fuzzy && Boolean(matchExpression),
+      distance: state.distance,
+      preserve: state.preserve,
+      layouts: state.layouts
+    };
+    countSql = buildSearchCountSql(common);
+
+    const countSets = await runSql(connection, countSql);
+    if (hasResultErrors(countSets)) {
+      return { error: collectMessages(countSets).map((message) => message.message).join('\n') };
+    }
+    const countRow = countSets[0]?.data?.[0] || {};
+    const total = Number(countRow.count ?? countRow['count(*)'] ?? Object.values(countRow)[0] ?? 0) || 0;
+
+    // Same clamp as browse (§4.2): never request a page whose OPTION
+    // max_matches could exhaust the node, and never point past the last row.
+    const maxPage = Math.max(1, Math.min(
+      Math.ceil(total / state.perPage) || 1,
+      Math.floor(maxBrowseWindow / state.perPage)
+    ));
+    if (state.page > maxPage) state.page = maxPage;
+    const offset = (state.page - 1) * state.perPage;
+
+    const selectOptions = {
+      ...common,
+      ranker: state.ranker,
+      weights: state.weights,
+      facet: state.facet,
+      limit: state.perPage,
+      offset
+    };
+    let metaAppended = appendMeta && Boolean(matchExpression);
+    searchSql = buildSearchSql({ ...selectOptions, appendMeta: metaAppended });
+
+    const startedAt = Date.now();
+    let sets;
+    try {
+      sets = await runSql(connection, searchSql);
+    } catch (error) {
+      // Multi-statement is not dependable across versions (§4.1): if the
+      // `; SHOW META` variant is what failed, drop to the single statement and
+      // remember that for this connection.
+      if (error.manticoreStatus && metaAppended) {
+        demoteMultiMeta(connection);
+        metaAppended = false;
+        searchSql = buildSearchSql({ ...selectOptions, appendMeta: false });
+        sets = await runSql(connection, searchSql);
+      } else {
+        throw error;
+      }
+    }
+    // Some builds "accept" the multi-statement but answer with a single or
+    // meta-less set (seen with other statement pairs on the test node). If the
+    // hits set is missing or META did not arrive, retreat the same way.
+    if (metaAppended && (sets.length < 2 || looksLikeMetaSet(sets[0]) || !looksLikeMetaSet(sets[sets.length - 1]))) {
+      demoteMultiMeta(connection);
+      metaAppended = false;
+      if (sets.length !== 1 || looksLikeMetaSet(sets[0])) {
+        searchSql = buildSearchSql({ ...selectOptions, appendMeta: false });
+        sets = await runSql(connection, searchSql);
+      }
+    }
+    const elapsedMs = Date.now() - startedAt;
+
+    const hits = sets[0] || { columns: [], data: [], total: 0, error: '', warning: '' };
+    if (hits.error) return { error: hits.error };
+
+    const messages = [];
+    for (const message of collectMessages(countSets)) {
+      if (message.type === 'warning') messages.push({ type: 'warning', message: message.message });
+    }
+    sets.forEach((set, index) => {
+      if (set?.warning) messages.push({ type: 'warning', message: set.warning });
+      if (index > 0 && set?.error) messages.push({ type: 'error', message: set.error });
+    });
+
+    const rows = hits.data || [];
+
+    let insight = null;
+    if (matchExpression) {
+      const lastSet = sets[sets.length - 1];
+      const metaSet = metaAppended && sets.length > 1 && looksLikeMetaSet(lastSet) ? lastSet : null;
+      if (metaSet) {
+        const meta = parseShowMeta(metaSet);
+        insight = {
+          totalFound: meta.totalFound || String(total),
+          total: String(rows.length),
+          time: meta.time,
+          elapsedMs,
+          keywords: meta.keywords,
+          source: 'meta'
+        };
+      } else {
+        let keywords = [];
+        try {
+          keywords = (await callKeywordStats(connection, table, matchExpression)).keywords;
+        } catch {
+          keywords = [];
+        }
+        insight = {
+          totalFound: String(total),
+          total: String(rows.length),
+          time: '',
+          elapsedMs,
+          keywords,
+          source: 'keywords'
+        };
+      }
+    }
+
+    let facet = null;
+    if (state.facet) {
+      const candidates = sets.slice(1).filter((set) => !looksLikeMetaSet(set) && !set?.error);
+      const facetSet = candidates.find((set) => columnNames(set)[0] === state.facet) || candidates[0] || null;
+      if (facetSet) {
+        const cols = columnNames(facetSet);
+        facet = {
+          attr: state.facet,
+          values: (facetSet.data || []).map((row) => ({
+            value: valueToText(row[cols[0]]),
+            count: valueToText(row[cols[1] ?? 'count(*)'])
+          }))
+        };
+      }
+    }
+
+    let didYouMean = null;
+    if (total === 0 && matchExpression && state.mode === 'plain' && !state.fuzzy && profile.suggest) {
+      try {
+        const { suggestions } = await callQsuggest(connection, table, state.q);
+        const best = suggestions.find((entry) => entry.distance > 0);
+        if (best) {
+          const corrected = state.q.replace(/\S+\s*$/u, best.suggest);
+          if (corrected && corrected !== state.q) {
+            didYouMean = { query: corrected, suggest: best.suggest, docs: best.docs };
+          }
+        }
+      } catch {
+        // did-you-mean is best-effort; a failed suggestion never breaks results
+      }
+    }
+
+    return { hits, total, messages, insight, facet, didYouMean };
+  } catch (error) {
+    // Bad input and query-level Manticore failures (it answers even syntax
+    // errors with HTTP 500) belong inline in the results panel, with the form
+    // intact; only transport problems bubble up as unreachable-node errors.
+    if (error.statusCode === 400 || error.manticoreStatus) return { error: error.message };
+    throw error;
+  }
+}
+
+async function handleSearch(req, res, connection, table, url) {
+  try {
+    const caps = await searchCapabilities(connection);
+    const [tablesData, schemaData, settingsResults] = await Promise.all([
+      listTables(connection),
+      describeTable(connection, table),
+      // settings only feed the autocomplete/suggest gate; a table type that
+      // cannot answer SHOW TABLE ... SETTINGS must not break the screen
+      showTableSettings(connection, table).catch(() => [])
+    ]);
+    const tableMeta = findTable(tablesData.tables, table);
+    if (!tableMeta) return respondNotFound(req, res, `Table ${table} not found`);
+    if (hasResultErrors(schemaData.results)) {
+      throw new Error(collectMessages(schemaData.results).map((message) => message.message).join('\n') || 'Could not read the table schema');
+    }
+
+    const profile = buildSearchProfile({ fields: schemaData.fields, tableMeta, caps, settingsResults });
+    const state = parseSearchState(url.searchParams, profile);
+    const results = await executeSearch(connection, table, profile, state, caps);
+    const status = results.error ? 400 : 200;
+
+    if (isHtmx(req) && htmxTarget(req) === 'search-results') {
+      const body = renderFilterBlock({ basePath: searchBasePath(connection, table), profile, state, oob: true })
+        + renderSearchResults({ connection, table, profile, state, results });
+      return sendHtml(res, status, body, pageHeaders);
+    }
+    return respond(req, res, status, renderSearchPage({ connection, table, profile, state, results }));
+  } catch (error) {
+    const status = error.statusCode || 502;
+    if (isHtmx(req)) return respondToastError(res, status, error.message || 'Search failed');
+    return respond(req, res, status, {
+      title: 'Search unavailable',
+      body: renderOperationPage({
+        title: 'Search unavailable',
+        message: error.message || 'Search failed',
+        backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
+      })
+    });
+  }
+}
+
+// As-you-type datalist options. Best-effort by design: any failure (no Buddy,
+// no min_infix_len, table gone) renders an empty datalist — never an error
+// toast on every keystroke.
+async function handleSearchAutocomplete(req, res, connection, table, url) {
+  const q = String(url.searchParams.get('q') || '').trim().slice(0, 100);
+  try {
+    const caps = await searchCapabilities(connection);
+    if (!q || !caps.buddy) return sendHtml(res, 200, renderAutocompleteDatalist([]), pageHeaders);
+    const { suggestions } = await callAutocomplete(connection, table, q);
+    return sendHtml(res, 200, renderAutocompleteDatalist(suggestions), pageHeaders);
+  } catch {
+    return sendHtml(res, 200, renderAutocompleteDatalist([]), pageHeaders);
+  }
+}
+
+// Lazy body of the "Explain query" details block in the insight panel.
+async function handleSearchExplain(req, res, connection, table, url) {
+  try {
+    const schemaData = await describeTable(connection, table);
+    if (hasResultErrors(schemaData.results)) {
+      return sendHtml(res, 200, renderExplainBody({
+        error: collectMessages(schemaData.results).map((message) => message.message).join('\n')
+      }), pageHeaders);
+    }
+    const profile = { fields: schemaData.fields, hasText: textFields(schemaData.fields).length > 0 };
+    const state = parseSearchState(url.searchParams, profile);
+    // EXPLAIN always uses the non-fuzzy expression: fuzzy expansion happens in
+    // Buddy, and the plain words are what the parser tree explains.
+    const matchExpression = buildMatchExpression({
+      mode: state.mode,
+      query: state.q,
+      fieldNames: state.fields,
+      allTextFieldNames: textFields(profile.fields).map((item) => item.name),
+      fuzzy: false
+    });
+    if (!matchExpression) return sendHtml(res, 200, renderExplainBody({}), pageHeaders);
+    const sets = await explainQuery(connection, table, matchExpression);
+    const errorText = collectMessages(sets).filter((message) => message.type === 'error')
+      .map((message) => message.message).join('\n');
+    if (errorText) return sendHtml(res, 200, renderExplainBody({ error: errorText }), pageHeaders);
+    const row = sets[0]?.data?.[0] || {};
+    const tree = String(row.Value ?? Object.values(row).at(-1) ?? '');
+    return sendHtml(res, 200, renderExplainBody({ tree }), pageHeaders);
+  } catch (error) {
+    return sendHtml(res, error.statusCode && error.statusCode < 500 ? error.statusCode : 200, renderExplainBody({ error: error.message }), pageHeaders);
+  }
+}
+
+// Full record for a search hit ("view row"). htmx requests get the inline
+// detail card (the hit's own container is the target); direct loads get a
+// standalone page, so the URL stays deep-linkable.
+async function handleRowView(req, res, connection, table, rowId) {
+  try {
+    const [tablesData, schemaData, rowResults] = await Promise.all([
+      listTables(connection),
+      describeTable(connection, table),
+      selectRowById(connection, table, rowId)
+    ]);
+    const tableMeta = findTable(tablesData.tables, table);
+    if (!tableMeta) return respondNotFound(req, res, `Table ${table} not found`);
+
+    const row = rowResults[0]?.data?.[0] || null;
+    const canWrite = isRealtimeTable(tableMeta);
+    const errorText = [...collectMessages(schemaData.results), ...collectMessages(rowResults)]
+      .map((message) => message.message).join('\n');
+
+    if (isHtmx(req)) {
+      if (!row) return sendHtml(res, 404, renderAlert(errorText || `Row ${rowId} not found`), pageHeaders);
+      return sendHtml(res, 200, renderRowDetail({
+        connection, table, fields: schemaData.fields, row, canWrite, asFragment: true
+      }), pageHeaders);
+    }
+    if (!row) return respondNotFound(req, res, errorText || `Row ${rowId} not found`);
+    return respond(req, res, 200, renderRowDetail({
+      connection, table, fields: schemaData.fields, row, canWrite, asFragment: false
+    }));
+  } catch (error) {
+    const status = error.statusCode || 502;
+    if (isHtmx(req)) return sendHtml(res, status, renderAlert(error.message || 'Could not load the row'), pageHeaders);
+    return respond(req, res, status, {
+      title: 'Row unavailable',
+      body: renderOperationPage({
+        title: 'Row unavailable',
+        message: error.message || 'Could not load the row',
+        backHref: `/connections/${connection.id}/tables/${encodeURIComponent(table)}`
+      })
+    });
+  }
+}
+
 async function renderBrowse(req, res, connection, table, query, extras = {}) {
   let page = clampInteger(query.page, 1, 1, 1000000);
   const perPage = clampInteger(query.perPage, 25, 1, 200);
-  const search = query.q || '';
+  let search = query.q || '';
   const dir = query.dir === 'desc' ? 'desc' : 'asc';
   let sort = query.sort || '';
 
@@ -378,6 +838,18 @@ async function renderBrowse(req, res, connection, table, query, extras = {}) {
     const tableMeta = findTable(tablesData.tables, table);
     const validFields = new Set(schemaData.fields.map((field) => field.name));
     if (sort && !validFields.has(sort)) sort = '';
+
+    // MATCH() is an error on tables without a text field (§4.7) — drop a
+    // crafted/stale ?q instead of sending a doomed statement, and say so.
+    const hasText = textFields(schemaData.fields).length > 0;
+    const searchGateMessages = [];
+    if (search && !hasText) {
+      search = '';
+      searchGateMessages.push({
+        type: 'warning',
+        message: 'This table has no full-text fields, so the text search was ignored. Use "Filter rows" to filter by attributes.'
+      });
+    }
 
     // Resolve the row count first so the requested page can be clamped to the
     // last real page (avoids "Page 999 of 2" and an offset past the last row).
@@ -398,6 +870,7 @@ async function renderBrowse(req, res, connection, table, query, extras = {}) {
     ]);
 
     const messages = [
+      ...searchGateMessages,
       ...collectMessages(tablesData.results),
       ...collectMessages(schemaData.results),
       ...collectMessages(statusResults),
@@ -421,7 +894,8 @@ async function renderBrowse(req, res, connection, table, query, extras = {}) {
         search,
         sort,
         dir,
-        canWrite
+        canWrite,
+        hasText
       });
       return sendHtml(res, 200, renderToastsOob(messages) + panel, pageHeaders);
     }
